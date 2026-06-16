@@ -22,15 +22,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from prometheus_biomystery.fusion import (
-    DEFAULT_FUSION_JUDGE_MODEL,
-    DEFAULT_FUSION_PANEL,
-    DEFAULT_PROMETHEUSBENCH_FUSION_SELECTION,
-    FUSION_MODEL,
-    fusion_tool,
-    parse_model_list,
-)
-
 DEFAULT_BASE_URL = "https://api.trustedrouter.com/v1"
 DEFAULT_MODELS = (
     "deepseek/deepseek-v4-pro",
@@ -594,10 +585,6 @@ def call_model(
     max_attempts: int = 3,
     native_tools: bool = False,
     local_model: str = DEFAULT_LOCAL_CLAUDE_MODEL,
-    fusion_panel: Sequence[str] | None = None,
-    fusion_judge_model: str = DEFAULT_FUSION_JUDGE_MODEL,
-    fusion_max_completion_tokens: int = 4096,
-    fusion_selection_strategy: str = DEFAULT_PROMETHEUSBENCH_FUSION_SELECTION,
 ) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
     if model.startswith(LOCAL_MODEL_PREFIX):
         return local_claude_complete(
@@ -608,21 +595,12 @@ def call_model(
             max_attempts=max_attempts,
         )
     body = {
-        "model": FUSION_MODEL if fusion_panel else model,
+        "model": model,
         "messages": messages,
         "temperature": 0,
         "max_tokens": max_tokens,
     }
-    if fusion_panel:
-        body["tools"] = [
-            fusion_tool(
-                panel=fusion_panel,
-                judge_model=fusion_judge_model,
-                max_completion_tokens=fusion_max_completion_tokens,
-                selection_strategy=fusion_selection_strategy,
-            )
-        ]
-    elif native_tools:
+    if native_tools:
         body["tools"] = biomystery_tools()
         body["tool_choice"] = "auto"
     data = _json_post(
@@ -846,10 +824,6 @@ def solve_problem(
     local_model: str = DEFAULT_LOCAL_CLAUDE_MODEL,
     exec_image: str | None = None,
     exec_blastdb: str | None = None,
-    fusion_panel: Sequence[str] | None = None,
-    fusion_judge_model: str = DEFAULT_FUSION_JUDGE_MODEL,
-    fusion_max_completion_tokens: int = 4096,
-    fusion_selection_strategy: str = DEFAULT_PROMETHEUSBENCH_FUSION_SELECTION,
 ) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + task_timeout if task_timeout > 0 else None
@@ -961,10 +935,6 @@ def solve_problem(
                 max_attempts=model_attempts,
                 native_tools=native_tools,
                 local_model=local_model,
-                fusion_panel=fusion_panel,
-                fusion_judge_model=fusion_judge_model,
-                fusion_max_completion_tokens=fusion_max_completion_tokens,
-                fusion_selection_strategy=fusion_selection_strategy,
             )
             if progress:
                 _progress(
@@ -1272,30 +1242,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--problem-limit", type=int, default=None)
     parser.add_argument("--episodes", type=int, default=1)
-    parser.add_argument("--fusion", action="store_true", help="Run through TrustedRouter Fusion.")
-    parser.add_argument("--fusion-panel", default=None, help="Comma-separated analysis model panel.")
-    parser.add_argument("--fusion-judge-model", default=DEFAULT_FUSION_JUDGE_MODEL)
-    parser.add_argument("--fusion-max-completion-tokens", type=int, default=4096)
-    parser.add_argument("--fusion-selection-strategy", default=DEFAULT_PROMETHEUSBENCH_FUSION_SELECTION)
     args = parser.parse_args(argv)
 
-    if args.models:
-        models = [part.strip() for part in args.models.split(",") if part.strip()]
-    elif args.fusion:
-        models = [FUSION_MODEL]
-    else:
-        models = list(DEFAULT_MODELS)
+    models = (
+        [part.strip() for part in args.models.split(",") if part.strip()]
+        if args.models
+        else list(DEFAULT_MODELS)
+    )
     # The local `claude` provider authenticates itself, so an API key is only
     # required when at least one model is routed through the remote API.
     if all(model.startswith(LOCAL_MODEL_PREFIX) for model in models):
         api_key = args.api_key or ""
     else:
         api_key = _api_key_from_env(args.api_key)
-    fusion_panel = (
-        parse_model_list(args.fusion_panel, default=DEFAULT_FUSION_PANEL)
-        if args.fusion
-        else None
-    )
     dataset_dir = ensure_preview_dataset(Path(args.work_root))
     problems = load_problems(dataset_dir)
     if args.problem_limit:
@@ -1337,10 +1296,6 @@ def main(argv: list[str] | None = None) -> int:
                         local_model=args.local_claude_model,
                         exec_image=args.exec_image,
                         exec_blastdb=args.exec_blastdb,
-                        fusion_panel=fusion_panel,
-                        fusion_judge_model=args.fusion_judge_model,
-                        fusion_max_completion_tokens=args.fusion_max_completion_tokens,
-                        fusion_selection_strategy=args.fusion_selection_strategy,
                     )
                 )
 
@@ -1365,13 +1320,6 @@ def main(argv: list[str] | None = None) -> int:
         "benchmark": "BioMysteryBench-preview reproduction",
         "created_at": created_at,
         "models": models,
-        "fusion": {
-            "enabled": bool(fusion_panel),
-            "model": FUSION_MODEL,
-            "analysis_models": list(fusion_panel or []),
-            "judge_model": args.fusion_judge_model if fusion_panel else "",
-            "selection_strategy": args.fusion_selection_strategy if fusion_panel else "",
-        },
         "harness": harness_meta,
         "results": raw_results,
     }
@@ -1384,13 +1332,6 @@ def main(argv: list[str] | None = None) -> int:
         "benchmark": "BioMysteryBench-preview reproduction",
         "created_at": created_at,
         "models": models,
-        "fusion": {
-            "enabled": bool(fusion_panel),
-            "model": FUSION_MODEL,
-            "analysis_models": list(fusion_panel or []),
-            "judge_model": args.fusion_judge_model if fusion_panel else "",
-            "selection_strategy": args.fusion_selection_strategy if fusion_panel else "",
-        },
         "harness": harness_meta,
         "problems": [
             {"id": problem.id, "human_solvable": problem.human_solvable}

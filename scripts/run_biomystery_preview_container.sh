@@ -24,6 +24,6 @@ docker run --rm \
   -v "$PWD:/workspace" \
   -w /workspace \
   "${mount_args[@]}" \
-  prometheus-biomystery:latest \
-  bash -lc 'python -m pip install --root-user-action=ignore -e . huggingface_hub >/tmp/prometheusbench-pip.log && python -m prometheus_biomystery.biomystery "$@"' \
+  prometheus-biomysterybench:latest \
+  bash -lc 'python -m pip install --root-user-action=ignore -e . huggingface_hub >/tmp/prometheusbench-pip.log && python -m prometheus_biomysterybench.biomystery "$@"' \
   bash "$@"

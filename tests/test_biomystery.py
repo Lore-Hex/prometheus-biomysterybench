@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from prometheus_biomystery import biomystery as biomystery_preview
-from prometheus_biomystery.biomystery import (
+from prometheus_biomysterybench import biomystery as biomystery_preview
+from prometheus_biomysterybench.biomystery import (
     Problem,
     _docker_exec_argv,
     _json_post,
@@ -28,7 +28,6 @@ from prometheus_biomystery.biomystery import (
     public_summary,
     safe_run_command,
 )
-from prometheus_biomystery.fusion import FUSION_MODEL, FUSION_TOOL_TYPE
 
 
 def test_parse_action_accepts_json_command() -> None:
@@ -256,51 +255,6 @@ def test_safe_run_command_truncates_large_output(tmp_path: Path) -> None:
     assert len(output) < 140
 
 
-def test_call_model_builds_fusion_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_post(
-        url: str,
-        *,
-        headers: dict[str, str],
-        body: dict[str, Any],
-        timeout: float,
-        max_attempts: int,
-    ) -> dict[str, Any]:
-        captured.update(
-            {"url": url, "headers": headers, "body": body, "timeout": timeout, "max_attempts": max_attempts}
-        )
-        return {"choices": [{"message": {"content": "{\"final\":\"ok\"}"}}], "usage": {"total_tokens": 5}}
-
-    monkeypatch.setattr("prometheus_biomystery.biomystery._json_post", fake_post)
-
-    text, usage, tool_calls = call_model(
-        base_url="https://api.trustedrouter.com/v1",
-        api_key="sk-test",
-        model="trustedrouter/fusion",
-        messages=[{"role": "user", "content": "test"}],
-        timeout=10,
-        max_tokens=256,
-        fusion_panel=("openai/gpt-5.5", "anthropic/claude-opus-4.8"),
-        fusion_judge_model="anthropic/claude-opus-4.8",
-        fusion_max_completion_tokens=4096,
-        fusion_selection_strategy="first_non_refusal",
-    )
-
-    body = captured["body"]
-    assert text == "{\"final\":\"ok\"}"
-    assert usage == {"total_tokens": 5}
-    assert tool_calls == []
-    assert captured["max_attempts"] == 3
-    assert body["model"] == FUSION_MODEL
-    assert body["tools"][0]["type"] == FUSION_TOOL_TYPE
-    assert body["tools"][0]["parameters"]["analysis_models"] == [
-        "openai/gpt-5.5",
-        "anthropic/claude-opus-4.8",
-    ]
-    assert body["tools"][0]["parameters"]["selection_strategy"] == "first_non_refusal"
-
-
 def test_call_model_builds_native_tool_request(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -333,7 +287,7 @@ def test_call_model_builds_native_tool_request(monkeypatch: pytest.MonkeyPatch) 
             "usage": {"total_tokens": 5},
         }
 
-    monkeypatch.setattr("prometheus_biomystery.biomystery._json_post", fake_post)
+    monkeypatch.setattr("prometheus_biomysterybench.biomystery._json_post", fake_post)
 
     text, usage, tool_calls = call_model(
         base_url="https://api.trustedrouter.com/v1",
@@ -354,7 +308,7 @@ def test_call_model_builds_native_tool_request(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_solve_problem_uses_native_tool_calls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from prometheus_biomystery import biomystery as biomystery_preview
+    from prometheus_biomysterybench import biomystery as biomystery_preview
 
     calls = [
         (

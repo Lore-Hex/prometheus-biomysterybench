@@ -1,4 +1,4 @@
-# prometheus-biomystery
+# prometheus-biomysterybench
 
 A small, **local and reproducible** harness for running the
 [BioMysteryBench](https://www.anthropic.com/research/Evaluating-Claude-For-Bioinformatics-With-BioMysteryBench)
@@ -26,7 +26,7 @@ It is a companion to [Lore-Hex/PrometheusBench](https://github.com/Lore-Hex/Prom
 ## What you get
 
 ```
-prometheus_biomystery/biomystery.py   the harness (dataset, agent loop, grading, aggregation)
+prometheus_biomysterybench/biomystery.py   the harness (dataset, agent loop, grading, aggregation)
 docker/biomystery/Dockerfile          bioinformatics container image
 scripts/build_biomystery_env.sh       build the image
 scripts/setup_blastdb.sh              download local BLAST databases
@@ -39,7 +39,7 @@ scripts/run_biomystery_preview_container.sh  run a remote model fully in-contain
 ### 1. Build the bioinformatics image
 
 ```bash
-scripts/build_biomystery_env.sh        # builds prometheus-biomystery:latest
+scripts/build_biomystery_env.sh        # builds prometheus-biomysterybench:latest
 ```
 
 ### 2. Set up local BLAST databases

@@ -7,7 +7,7 @@
 # Env (all optional):
 #   MODEL_ID             results label / provider id (default: local/claude-opus-4.8)
 #   LOCAL_CLAUDE_MODEL   --model passed to the claude CLI (default: claude-opus-4-8)
-#   IMAGE                exec container image (default: prometheus-biomystery:latest)
+#   IMAGE                exec container image (default: prometheus-biomysterybench:latest)
 #   BLASTDB_DIR          host BLAST DB dir (default: ${HOME}/blastdb)
 #
 # Extra args are appended verbatim and override the defaults below
@@ -17,11 +17,11 @@ cd "$(dirname "$0")/.."
 
 MODEL_ID="${MODEL_ID:-local/claude-opus-4.8}"
 LOCAL_CLAUDE_MODEL="${LOCAL_CLAUDE_MODEL:-claude-opus-4-8}"
-IMAGE="${IMAGE:-prometheus-biomystery:latest}"
+IMAGE="${IMAGE:-prometheus-biomysterybench:latest}"
 BLASTDB_DIR="${BLASTDB_DIR:-${HOME}/blastdb}"
 DATE="$(date +%F)"
 
-uv run --with huggingface_hub python -m prometheus_biomystery.biomystery \
+uv run --with huggingface_hub python -m prometheus_biomysterybench.biomystery \
   --models "$MODEL_ID" \
   --local-claude-model "$LOCAL_CLAUDE_MODEL" \
   --exec-image "$IMAGE" \

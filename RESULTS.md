@@ -2,7 +2,7 @@
 
 Local self-solve of the **BioMysteryBench 5-task public preview** using the
 `claude` CLI as the agent (Opus 4.8), with each tool command executed inside the
-`prometheus-biomystery` container and the four small local BLAST databases
+`prometheus-biomysterybench` container and the four small local BLAST databases
 mounted read-only.
 
 Raw transcripts, problem prompts, and answer rubrics are kept private and are
@@ -14,7 +14,7 @@ Raw transcripts, problem prompts, and answer rubrics are kept private and are
 |---|---|
 | Provider | `local/claude-opus-4.8` (local `claude` CLI, `--model claude-opus-4-8`) |
 | Tool protocol | native function tool calls (`run_shell`, `submit_answer`) |
-| Command sandbox | `prometheus-biomystery:latest` container, per-task |
+| Command sandbox | `prometheus-biomysterybench:latest` container, per-task |
 | Local BLAST | `taxdb`, `swissprot`, `pdbaa`, `pdbnt` at `/blastdb` (read-only) |
 | Network | enabled, gated by each task's `allowed_domains` |
 | Budgets | `--max-turns 30 --command-timeout 900 --task-timeout 2400 --model-attempts 4` |

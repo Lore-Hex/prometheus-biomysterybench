@@ -8,13 +8,13 @@
 #
 # Env:
 #   BLASTDB_DIR   target directory for the DBs (default: ${HOME}/blastdb)
-#   IMAGE         biomystery image to use (default: prometheus-biomystery:latest)
+#   IMAGE         biomystery image to use (default: prometheus-biomysterybench:latest)
 #   MIN_FREE_GB   refuse refseq_protein/nr/nt unless this many GB are free (default: 400)
 #   FORCE_BIG     set to 1 to bypass the large-DB disk guard
 set -euo pipefail
 
 BLASTDB_DIR="${BLASTDB_DIR:-${HOME}/blastdb}"
-IMAGE="${IMAGE:-prometheus-biomystery:latest}"
+IMAGE="${IMAGE:-prometheus-biomysterybench:latest}"
 MIN_FREE_GB="${MIN_FREE_GB:-400}"
 FORCE_BIG="${FORCE_BIG:-0}"
 

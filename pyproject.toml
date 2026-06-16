@@ -1,5 +1,5 @@
 [project]
-name = "prometheus-biomystery"
+name = "prometheus-biomysterybench"
 version = "0.1.0"
 description = "Local, reproducible harness for the BioMysteryBench public preview, with Dockerized bioinformatics tools, local BLAST databases, and a local-claude self-solve mode."
 readme = "README.md"
@@ -10,15 +10,15 @@ keywords = ["llm", "benchmark", "bioinformatics", "blast", "evals", "biomysteryb
 dependencies = ["huggingface_hub>=0.20"]
 
 [project.urls]
-Homepage = "https://github.com/Lore-Hex/prometheus-biomystery"
-Issues = "https://github.com/Lore-Hex/prometheus-biomystery/issues"
+Homepage = "https://github.com/Lore-Hex/prometheus-biomysterybench"
+Issues = "https://github.com/Lore-Hex/prometheus-biomysterybench/issues"
 Companion = "https://github.com/Lore-Hex/PrometheusBench"
 
 [project.scripts]
-prometheus-biomystery = "prometheus_biomystery.biomystery:main"
+prometheus-biomysterybench = "prometheus_biomysterybench.biomystery:main"
 
 [tool.setuptools.packages.find]
-include = ["prometheus_biomystery*"]
+include = ["prometheus_biomysterybench*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
