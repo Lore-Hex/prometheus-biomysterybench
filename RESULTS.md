@@ -79,5 +79,23 @@ noise of 40.0% on a two-task sample. Exact-percentage parity needs the full
 99-task set (not public) — but the *behavior* reproduces cleanly.
 
 `hb002` was solved with **remote** BLAST (with one flaky timeout), so the
-in-progress local `refseq_protein` will make species identification *reliable*
-across episodes rather than being the difference between solving and failing.
+local `refseq_protein` makes species identification *reliable* across episodes
+rather than being the difference between solving and failing.
+
+## Can Fusion crack the human-difficult misses?
+
+We ran `trustedrouter/fusion` (8-model panel, `synthesize` — a judge merges all
+non-refusing panel answers each turn) on the two tasks Opus alone missed:
+
+| Task | Opus 4.8 alone | Fusion (synthesize) | Expected |
+|---|---|---|---|
+| hb022 | Sample_09–16 (wrong group) | Sample_09–16 — **same wrong group** | Sample_01–08 |
+| hb053 | "light stress" | "shade stress" — **still light-family** | Heat stress |
+
+**No improvement.** Both still missed, in the same direction, at heavy cost
+(hb053 alone burned ~1.17M tokens across the panel). The lesson: synthesis only
+helps when the panel *disagrees* and someone is right. Here all the models share
+the same wrong inference (the Erastin direction backwards on hb022; a light/shade
+reading instead of heat on hb053), so the judge synthesizes to the same wrong
+answer — diverse models, shared blind spot. Fusion is not a substitute for a
+capability the underlying models lack.
