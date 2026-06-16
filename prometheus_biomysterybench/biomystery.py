@@ -65,6 +65,7 @@ DEFAULT_FUSION_PANEL = (
     "minimax/minimax-m3",
     "google/gemini-3.5-flash",
     "google/gemini-3.1-pro-preview",
+    "google/gemini-2.5-pro",
 )
 DEFAULT_FUSION_JUDGE_MODEL = "anthropic/claude-opus-4.8"
 DEFAULT_FUSION_SELECTION = "synthesize"
