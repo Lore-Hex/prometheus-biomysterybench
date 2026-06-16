@@ -47,14 +47,37 @@ clearly marked as less faithful.
 
 ## 5-task preview, Opus 4.8 (native tool-calling, 2 episodes)
 
-The preview is 3 human-solvable + 2 human-difficult tasks.
+The preview is 3 human-solvable + 2 human-difficult tasks. Run 2026-06-16,
+`anthropic/claude-opus-4.8` via TrustedRouter, native tool calls, `--max-turns 60`.
 
-_Definitive run in progress; numbers land here when it completes. Early
-confirmation: on `hb020` (organism of a scrubbed crystal structure) Opus
-extracts the sequence and runs real `blastp` — no fabrication — and simply needs
-a generous turn budget to finish, which this run provides._
+| Subset | Solved (≥1 of 2 episodes) |
+|---|---|
+| **Human-solvable** | **3 / 3** |
+| Human-difficult | 0 / 2 |
+| **Overall problems** | **3 / 5** |
+| Per-attempt | 5 / 10 |
 
-For reference, the published Opus 4.8 numbers on the **full 99-task**
-BioMysteryBench are Human-Solvable 80.4% and Human-Difficult 40.0% (Claude
-Fable 5 / Mythos 5 system card). A 5-task preview is far too small for those
-rates to transfer; this is a tooling/repeatability check, not official parity.
+| Task | HS | ep1 | ep2 | Note |
+|---|---|---|---|---|
+| hb020 — organism of a crystal structure | yes | ✓ Homo sapiens | ✓ Homo sapiens | real `blastp`, both episodes |
+| hb002 — bacterium in a genome | yes | ✗ network `TimeoutError` | ✓ Bacillus licheniformis | solved via remote BLAST; ep1 was a transient read timeout, not a wrong answer |
+| recq… — TF from ChIP peaks | yes | ✓ CTCF | ✓ CTCF | real MEME motif discovery |
+| hb022 — which samples were drug-treated | no | ✗ wrong condition | ✗ wrong condition | split the samples correctly but picked the wrong group as Erastin-treated (a 50/50 call) |
+| hb053 — stress on a transcriptome | no | ✗ "light stress" | ✗ "light stress" | concluded light vs the expected heat stress |
+
+**Reading it:** on the honest harness — real tool boundaries, no fabrication,
+no coaching — Opus 4.8 solves **all three human-solvable tasks**, doing genuine
+BLAST and MEME analysis (vs ~0 on the earlier text-mode harness, where it
+fabricated results). The two human-difficult misses are genuinely hard and a
+tiny sample.
+
+This is a faithful **approximation**, not exact replication. The published
+Opus 4.8 numbers on the **full 99-task** BioMysteryBench are Human-Solvable
+**80.4%** and Human-Difficult **40.0%** (Claude Fable 5 / Mythos 5 system card).
+Our 3/3 human-solvable is consistent with 80.4%; 0/2 human-difficult is within
+noise of 40.0% on a two-task sample. Exact-percentage parity needs the full
+99-task set (not public) — but the *behavior* reproduces cleanly.
+
+`hb002` was solved with **remote** BLAST (with one flaky timeout), so the
+in-progress local `refseq_protein` will make species identification *reliable*
+across episodes rather than being the difference between solving and failing.
