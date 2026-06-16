@@ -63,7 +63,7 @@ DEFAULT_FUSION_PANEL = (
     "moonshotai/kimi-k2.7-code",
     "z-ai/glm-5.1",
     "minimax/minimax-m3",
-    "google/gemini-3-flash-preview",
+    "google/gemini-3.5-flash",
     "google/gemini-3.1-pro-preview",
 )
 DEFAULT_FUSION_JUDGE_MODEL = "anthropic/claude-opus-4.8"
