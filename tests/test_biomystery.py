@@ -640,6 +640,37 @@ def test_call_model_routes_local_prefix_to_local_provider(monkeypatch: pytest.Mo
     assert captured["native_tools"] is True
 
 
+def test_call_model_fusion_adds_panel_plugin_alongside_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, *, headers: dict[str, str], body: dict[str, Any], timeout: float, max_attempts: int):
+        captured["body"] = body
+        return {"choices": [{"message": {"content": "", "tool_calls": []}}], "usage": {}}
+
+    monkeypatch.setattr(biomystery_preview, "_json_post", fake_post)
+    call_model(
+        base_url="https://api.trustedrouter.com/v1",
+        api_key="k",
+        model="trustedrouter/fusion",
+        messages=[{"role": "user", "content": "go"}],
+        timeout=10,
+        max_tokens=256,
+        native_tools=True,
+        fusion_panel=("openai/gpt-5.5", "anthropic/claude-opus-4.8"),
+        fusion_judge_model="anthropic/claude-opus-4.8",
+        fusion_selection="synthesize",
+    )
+    body = captured["body"]
+    assert body["model"] == "trustedrouter/fusion"
+    types = [t.get("type") for t in body["tools"]]
+    # function tools (run_shell/submit_answer) AND the fusion plugin coexist
+    assert "function" in types and "trustedrouter:fusion" in types
+    fusion = next(t for t in body["tools"] if t["type"] == "trustedrouter:fusion")
+    assert fusion["parameters"]["selection_strategy"] == "synthesize"
+    assert fusion["parameters"]["analysis_models"] == ["openai/gpt-5.5", "anthropic/claude-opus-4.8"]
+    assert fusion["parameters"]["model"] == "anthropic/claude-opus-4.8"
+
+
 def test_docker_exec_argv_enforces_in_container_timeout() -> None:
     argv = _docker_exec_argv("bm_container", "blastp -db pdbaa -query q.faa", 45)
     assert argv[:5] == ["docker", "exec", "-w", "/work", "bm_container"]

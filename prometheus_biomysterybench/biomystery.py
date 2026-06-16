@@ -51,6 +51,41 @@ _LOCAL_JSON_INSTRUCTION = (
     '{"cmd": "<shell command>"} to inspect/analyze files, or '
     '{"final": "<short final answer>"} when ready. No prose, no markdown fences.'
 )
+
+# TrustedRouter Fusion: model id "trustedrouter/fusion" runs a panel of models
+# and (with selection_strategy "synthesize", the gateway default) a judge that
+# synthesizes across all non-refusing panel answers into one response. The
+# panel drives the same native run_shell/submit_answer loop as a single model.
+FUSION_MODEL = "trustedrouter/fusion"
+DEFAULT_FUSION_PANEL = (
+    "openai/gpt-5.5",
+    "anthropic/claude-opus-4.8",
+    "moonshotai/kimi-k2.7-code",
+    "z-ai/glm-5.1",
+    "minimax/minimax-m3",
+    "google/gemini-3-flash-preview",
+    "google/gemini-3.1-pro-preview",
+)
+DEFAULT_FUSION_JUDGE_MODEL = "anthropic/claude-opus-4.8"
+DEFAULT_FUSION_SELECTION = "synthesize"
+
+
+def fusion_tool(
+    *,
+    panel: Sequence[str],
+    judge_model: str,
+    max_completion_tokens: int = 4096,
+    selection_strategy: str = DEFAULT_FUSION_SELECTION,
+) -> dict[str, Any]:
+    return {
+        "type": "trustedrouter:fusion",
+        "parameters": {
+            "analysis_models": list(panel),
+            "model": judge_model,
+            "max_completion_tokens": max_completion_tokens,
+            "selection_strategy": selection_strategy,
+        },
+    }
 BIO_TOOL_COMMANDS = (
     "samtools",
     "bcftools",
@@ -585,6 +620,10 @@ def call_model(
     max_attempts: int = 3,
     native_tools: bool = False,
     local_model: str = DEFAULT_LOCAL_CLAUDE_MODEL,
+    fusion_panel: Sequence[str] = DEFAULT_FUSION_PANEL,
+    fusion_judge_model: str = DEFAULT_FUSION_JUDGE_MODEL,
+    fusion_selection: str = DEFAULT_FUSION_SELECTION,
+    fusion_max_completion_tokens: int = 4096,
 ) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
     if model.startswith(LOCAL_MODEL_PREFIX):
         return local_claude_complete(
@@ -600,9 +639,22 @@ def call_model(
         "temperature": 0,
         "max_tokens": max_tokens,
     }
+    tools: list[dict[str, Any]] = []
     if native_tools:
-        body["tools"] = biomystery_tools()
+        tools = list(biomystery_tools())
         body["tool_choice"] = "auto"
+    if model == FUSION_MODEL:
+        # The panel drives the same agentic loop; the judge synthesizes per turn.
+        tools.append(
+            fusion_tool(
+                panel=fusion_panel,
+                judge_model=fusion_judge_model,
+                max_completion_tokens=fusion_max_completion_tokens,
+                selection_strategy=fusion_selection,
+            )
+        )
+    if tools:
+        body["tools"] = tools
     data = _json_post(
         base_url.rstrip("/") + "/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
@@ -824,6 +876,9 @@ def solve_problem(
     local_model: str = DEFAULT_LOCAL_CLAUDE_MODEL,
     exec_image: str | None = None,
     exec_blastdb: str | None = None,
+    fusion_panel: Sequence[str] = DEFAULT_FUSION_PANEL,
+    fusion_judge_model: str = DEFAULT_FUSION_JUDGE_MODEL,
+    fusion_selection: str = DEFAULT_FUSION_SELECTION,
 ) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + task_timeout if task_timeout > 0 else None
@@ -925,6 +980,9 @@ def solve_problem(
                 max_attempts=model_attempts,
                 native_tools=native_tools,
                 local_model=local_model,
+                fusion_panel=fusion_panel,
+                fusion_judge_model=fusion_judge_model,
+                fusion_selection=fusion_selection,
             )
             if progress:
                 _progress(
@@ -1231,8 +1289,25 @@ def main(argv: list[str] | None = None) -> int:
         help="Host BLAST DB directory mounted read-only at /blastdb (BLASTDB=/blastdb) in the exec container.",
     )
     parser.add_argument("--problem-limit", type=int, default=None)
+    parser.add_argument(
+        "--problem-ids",
+        default=None,
+        help="Comma-separated problem ids to run (e.g. hb022,hb053); default runs all.",
+    )
     parser.add_argument("--episodes", type=int, default=1)
+    parser.add_argument(
+        "--fusion-panel",
+        default=",".join(DEFAULT_FUSION_PANEL),
+        help="Comma-separated analysis panel for model id 'trustedrouter/fusion'.",
+    )
+    parser.add_argument("--fusion-judge-model", default=DEFAULT_FUSION_JUDGE_MODEL)
+    parser.add_argument(
+        "--fusion-selection",
+        default=DEFAULT_FUSION_SELECTION,
+        help="synthesize (default; judge merges all non-refusing answers), first_success, or first_non_refusal.",
+    )
     args = parser.parse_args(argv)
+    fusion_panel = tuple(part.strip() for part in args.fusion_panel.split(",") if part.strip())
 
     models = (
         [part.strip() for part in args.models.split(",") if part.strip()]
@@ -1247,6 +1322,12 @@ def main(argv: list[str] | None = None) -> int:
         api_key = _api_key_from_env(args.api_key)
     dataset_dir = ensure_preview_dataset(Path(args.work_root))
     problems = load_problems(dataset_dir)
+    if args.problem_ids:
+        wanted = {p.strip() for p in args.problem_ids.split(",") if p.strip()}
+        problems = [p for p in problems if p.id in wanted]
+        missing = wanted - {p.id for p in problems}
+        if missing:
+            raise SystemExit(f"unknown problem ids: {', '.join(sorted(missing))}")
     if args.problem_limit:
         problems = problems[: args.problem_limit]
     raw_results = []
@@ -1286,6 +1367,9 @@ def main(argv: list[str] | None = None) -> int:
                         local_model=args.local_claude_model,
                         exec_image=args.exec_image,
                         exec_blastdb=args.exec_blastdb,
+                        fusion_panel=fusion_panel,
+                        fusion_judge_model=args.fusion_judge_model,
+                        fusion_selection=args.fusion_selection,
                     )
                 )
 
@@ -1305,6 +1389,11 @@ def main(argv: list[str] | None = None) -> int:
         "local_claude_model": args.local_claude_model,
         "exec_image": args.exec_image,
         "exec_blastdb": args.exec_blastdb,
+        "fusion": (
+            {"panel": list(fusion_panel), "judge_model": args.fusion_judge_model, "selection": args.fusion_selection}
+            if FUSION_MODEL in models
+            else None
+        ),
     }
     private_payload = {
         "benchmark": "BioMysteryBench-preview reproduction",
