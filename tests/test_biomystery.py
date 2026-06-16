@@ -11,7 +11,6 @@ import pytest
 from prometheus_biomysterybench import biomystery as biomystery_preview
 from prometheus_biomysterybench.biomystery import (
     Problem,
-    _claims_unrun_search,
     _docker_exec_argv,
     _json_post,
     _local_action_to_tool_calls,
@@ -647,29 +646,6 @@ def test_docker_exec_argv_enforces_in_container_timeout() -> None:
     assert argv[5:7] == ["bash", "-lc"]
     assert "timeout --signal=KILL 45 bash -lc" in argv[7]
     assert "blastp -db pdbaa -query q.faa" in argv[7]
-
-
-def test_claims_unrun_search_flags_fabricated_blast() -> None:
-    # Claims a BLAST top hit but only inspected files -> fabricated.
-    assert _claims_unrun_search(
-        "The 16S rRNA gene best matches Bacillus altitudinis as the top hit (99.93% identity).",
-        ["head -c 500 genome.fasta", "grep -c '>' genome.fasta"],
-    )
-
-
-def test_claims_unrun_search_ok_when_search_actually_ran() -> None:
-    assert not _claims_unrun_search(
-        "BLAST top hit is Homo sapiens at 100% identity.",
-        ["blastp -query q.faa -db swissprot -outfmt 6"],
-    )
-
-
-def test_claims_unrun_search_ignores_non_search_answers() -> None:
-    # A pandas/expression analysis answer that never mentions a search is fine.
-    assert not _claims_unrun_search(
-        "Differential expression shows heat-shock factors strongly upregulated.",
-        ["python3 analyze.py"],
-    )
 
 
 def test_local_blast_databases_lists_query_targets_only(tmp_path: Path) -> None:

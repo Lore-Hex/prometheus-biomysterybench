@@ -35,16 +35,6 @@ TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 LOCAL_MODEL_PREFIX = "local/"
 DEFAULT_LOCAL_CLAUDE_MODEL = "claude-opus-4-8"
 EXEC_TIMEOUT_BACKSTOP = 20.0
-# Anti-fabrication guard: reject a submit_answer that claims a sequence-search
-# result when no such search was actually run in the session. Models sometimes
-# "recognize" a sequence and invent a BLAST hit ("top hit 99.9% identity") they
-# never computed. Capped so a determined model is not blocked indefinitely.
-MAX_SEARCH_PUSHBACKS = 2
-_SEARCH_CLAIM_RE = re.compile(r"blast|top hit|best (?:hit|match)|e-?value|%\s*identit|percent identit|aligned", re.I)
-_SEARCH_TOOL_RE = re.compile(
-    r"\b(blastn|blastp|blastx|tblastn|tblastx|psiblast|deltablast|rpsblast|blastdbcmd|"
-    r"diamond|hmmscan|hmmsearch|phmmer|jackhmmer|esearch|efetch|datasets)\b"
-)
 _LOCAL_NATIVE_INSTRUCTION = (
     "\n\nRESPONSE FORMAT: You have no tools of your own; the harness runs commands for you. "
     "First reason briefly about what to do next, then END your reply with your chosen action as a "
@@ -54,9 +44,7 @@ _LOCAL_NATIVE_INSTRUCTION = (
     '{"tool": "submit_answer", "answer": "<short final biological answer>"} only once the actual '
     "command outputs shown above support a specific answer. "
     "Emit exactly ONE action and then STOP. Do NOT write, imagine, or assume the command's output — "
-    "the real output is returned to you on the next turn. Never state or rely on the result of a "
-    "search, BLAST, or command you have not actually run; base every conclusion only on tool outputs "
-    "already shown above, not on recall. Do not guess: derive the answer from the data."
+    "the real output is returned to you on the next turn, and you base your next step on it."
 )
 _LOCAL_JSON_INSTRUCTION = (
     "\n\nRESPONSE FORMAT: Reply with EXACTLY one minified JSON object and nothing else: "
@@ -815,13 +803,6 @@ def grade_answer(answer: str, rubric: str) -> float:
     return 1.0 if normalize_answer(expected[0]) in normalized else 0.0
 
 
-def _claims_unrun_search(reasoning: str, commands_run: Sequence[str]) -> bool:
-    """True if ``reasoning`` claims a sequence-search result but no search command ran."""
-    if not _SEARCH_CLAIM_RE.search(reasoning or ""):
-        return False
-    return not any(_SEARCH_TOOL_RE.search(command) for command in commands_run)
-
-
 def solve_problem(
     *,
     base_url: str,
@@ -854,42 +835,28 @@ def solve_problem(
     tools = container_tool_inventory(exec_image) if exec_image else tool_inventory()
     blast_dbs = local_blast_databases(exec_blastdb or os.environ.get("BLASTDB"))
     blast_note = (
-        f"Local BLAST databases (query with blastp/blastn -db NAME; BLASTDB is preset): "
-        f"{', '.join(blast_dbs)}. Prefer these over remote BLAST; use remote BLAST only as a fallback.\n\n"
+        f"Local BLAST databases at $BLASTDB (query with blastp/blastn -db NAME): {', '.join(blast_dbs)}.\n\n"
         if blast_dbs
         else ""
     )
     system_prompt = (
         """\
-        You are solving a BioMysteryBench preview task in a local directory.
-        You may inspect files by issuing shell commands through the run_shell tool.
-        Use submit_answer when ready with the short final biological answer.
+        You are solving a BioMysteryBench task in a local working directory.
+        Inspect and analyze the files by issuing shell commands through the run_shell tool.
+        Bioinformatics tools, pip/conda, and any listed local BLAST databases are available.
+        Call submit_answer with the short final biological answer when you are confident.
         Keep commands non-destructive.
-        For remote BLAST or external database queries, request timeout_seconds near 900.
-        Prefer canonical bioinformatics tools when they are available.
-        Prefer local BLAST databases over remote BLAST whenever the needed database is listed as available.
-        Identifying metadata is often scrubbed from the inputs, so derive the answer from the data
-        itself (for example, extract sequences and BLAST them). For identification questions (which
-        organism/species/gene/cell type), confirm the answer with an actual database search rather
-        than recognition. Never fabricate or assume command or BLAST outputs; rely only on results
-        actually returned to you. Do not guess: only submit an answer that your analysis supports.
+        For remote BLAST or other external database queries, request timeout_seconds near 900.
         """
         if native_tools
         else """\
-        You are solving a BioMysteryBench preview task in a local directory.
-        You may inspect files by issuing shell commands.
+        You are solving a BioMysteryBench task in a local working directory.
+        Inspect and analyze the files by issuing shell commands.
         Reply with exactly one JSON object per turn:
         {"cmd": "shell command"} to inspect/analyze files, or
         {"final": "short final answer"} when ready.
         Do not wrap the JSON in prose.
         Keep commands non-destructive.
-        Prefer canonical bioinformatics tools when they are available.
-        Prefer local BLAST databases over remote BLAST whenever the needed database is listed as available.
-        Identifying metadata is often scrubbed from the inputs, so derive the answer from the data
-        itself (for example, extract sequences and BLAST them). For identification questions, confirm
-        the answer with an actual database search rather than recognition. Never fabricate or assume
-        command or BLAST outputs; rely only on results actually returned to you. Do not guess: only
-        give an answer that your analysis supports.
         """
     )
     start_instruction = (
@@ -916,11 +883,9 @@ def solve_problem(
         },
     ]
     transcript: list[dict[str, Any]] = []
-    commands_run: list[str] = []
     usage_totals: dict[str, int] = {}
     final = ""
     error = ""
-    search_pushbacks = 0
 
     exec_container: str | None = None
     container_error = ""
@@ -986,36 +951,7 @@ def solve_problem(
                 tool_call_id = str(tool_call.get("id") or f"call_{turn}_{index}")
                 if tool_name == "submit_answer":
                     answer = tool_args.get("answer")
-                    candidate = answer.strip() if isinstance(answer, str) else ""
-                    if (
-                        candidate
-                        and search_pushbacks < MAX_SEARCH_PUSHBACKS
-                        and _claims_unrun_search(text, commands_run)
-                    ):
-                        search_pushbacks += 1
-                        output = (
-                            "Your answer references the result of a sequence search (e.g. BLAST), but no "
-                            "such command was actually run in this session. Run the real search now and "
-                            "base your answer only on its actual output."
-                        )
-                        if progress:
-                            _progress(
-                                f"{model} {problem.id} turn {turn}: rejected submit_answer "
-                                f"(claimed a search that was never run)"
-                            )
-                        transcript.append(
-                            {
-                                "turn": turn,
-                                "assistant": text[:4000],
-                                "action": {"tool": tool_name, "rejected": "unrun_search_claim"},
-                                "tool_call_id": tool_call_id,
-                                "returncode": 126,
-                                "output": output,
-                            }
-                        )
-                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": output})
-                        continue
-                    final = candidate
+                    final = answer.strip() if isinstance(answer, str) else ""
                     transcript.append(
                         {
                             "turn": turn,
@@ -1057,7 +993,6 @@ def solve_problem(
                     )
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": output})
                     continue
-                commands_run.append(command)
                 run_timeout = command_timeout
                 requested_timeout = tool_args.get("timeout_seconds")
                 if isinstance(requested_timeout, int | float):
@@ -1131,7 +1066,6 @@ def solve_problem(
         if not command:
             error = "invalid_action"
             break
-        commands_run.append(command)
         run_timeout = command_timeout
         if deadline is not None:
             remaining = deadline - time.monotonic()
