@@ -727,10 +727,12 @@ def safe_run_command(
         return 126, f"Blocked command by preview harness policy: {command}"
     if error := _network_policy_error(command, allow_network=allow_network, allowed_domains=allowed_domains):
         return 126, f"Blocked command by preview network policy: {error}"
+    # Binary mode (no text=True): some tools emit non-UTF-8 bytes, which would
+    # crash a text-mode pipe with UnicodeDecodeError. _decode_command_output
+    # decodes with errors="replace" instead.
     if exec_container:
         process = subprocess.Popen(
             _docker_exec_argv(exec_container, command, timeout),
-            text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -741,7 +743,6 @@ def safe_run_command(
             command,
             cwd=cwd,
             shell=True,
-            text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             executable="/bin/bash",
