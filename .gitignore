@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# Eval workspace and outputs
+.eval_work/
+.eval_results_private/
+
+# Raw private transcripts must never be committed. Public summaries under
+# results/ are opt-in: commit them deliberately, not by default.
+results/
+
+# BLAST databases (downloaded separately; can be hundreds of GB)
+blastdb/
+*.tar.gz
