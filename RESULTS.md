@@ -99,3 +99,42 @@ the same wrong inference (the Erastin direction backwards on hb022; a light/shad
 reading instead of heat on hb053), so the judge synthesizes to the same wrong
 answer — diverse models, shared blind spot. Fusion is not a substitute for a
 capability the underlying models lack.
+
+We then tried two more panel shapes on the same two tasks — a single frontier
+model, and a curated 3-model panel (Gemma-4-31B + GLM-5.2 + Opus 4.8, judge =
+Opus). All three configurations land on the **same wrong answers**:
+
+| config | hb022 | hb053 | result |
+|---|---|---|---|
+| single Opus 4.8 | Sample_09–16 | "light stress" | 0/2 |
+| 8-model Fusion | Sample_09–16 | "shade stress" | 0/2 |
+| 3-way Fusion (gemma+glm-5.2+opus) | Sample_09–16 | "light stress" | 0/2 |
+
+A hand-picked diverse panel does not break the blind spot, which is the
+strongest version of the result: these two tasks need a capability none of the
+models have, not a better committee.
+
+## Per-model comparison (cheapest model that matches Opus)
+
+3 human-solvable tasks (hb020 organism-of-structure, hb002 bacterium-in-genome,
+recq TF-from-ChIP-peaks), 1 episode, native tool-calling, run 2026-06-16.
+Cost is the actual TR spend for the 3-task run (tokens × TR pricing).
+
+| Model | $/Mtok (blended) | Solved | Run cost | Notes |
+|---|---:|:---:|---:|---|
+| `anthropic/claude-opus-4.8` | 19.80 | **3/3** | $1.57 | only clean sweep; finishes the long MEME task |
+| `z-ai/glm-5.2` | 4.01 | 2/3 | $2.72 | solved recq (CTCF); hb002 timed out |
+| `google/gemma-4-31b-it` | 0.35 | 2/3 | **$0.04** | solved hb020 + hb002 in few turns; recq timed out |
+| `deepseek/deepseek-v4-flash` | 0.27 | 1/3 | $0.21 | hb020 only |
+| `deepseek/deepseek-v3.2` | 0.45 | 1/3 | $0.31 | hb020 only |
+| `deepseek/deepseek-v4-pro` | 0.84 | 1/3 | $1.03 | hb020 only |
+| `moonshotai/kimi-k2.7-code` | 3.56 | 1/3 | $1.12 | hb020 only (bare `kimi-k2.7` rejects chat completions on TR) |
+| `z-ai/glm-4.7-flash` | 0.38 | 0/3 | $0.70 | max-turns / timeouts |
+| `openai/gpt-4o-mini` | 0.54 | 0/3 | $0.10 | max-turns / wrong IDs |
+
+Reading it: no cheap model matches Opus's 3/3, but `gemma-4-31b` (2/3 for ~4
+cents) and `glm-5.2` (2/3) get most of the way. Almost every model solves the
+one-shot identification (7/9 got hb020); they fall apart on the multi-step MEME
+task (recq), running out of turns or hitting the read timeout. Several misses in
+the table are timeouts, not wrong answers. The frontier model's edge here is
+finishing a long agentic loop, not knowing more biology.
