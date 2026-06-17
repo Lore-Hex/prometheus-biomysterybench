@@ -33,6 +33,7 @@ prometheus_biomysterybench/biomystery.py   the harness (dataset, agent loop, gra
 docker/biomystery/Dockerfile          bioinformatics container image
 scripts/build_biomystery_env.sh       build the image
 scripts/setup_blastdb.sh              download local BLAST databases
+scripts/setup_diamond_db.sh           build a fast DIAMOND protein db (refseq_protein/nr)
 scripts/run_biomystery_self_solve.sh  self-solve with your local `claude` CLI
 scripts/run_biomystery_preview_container.sh  run a remote model fully in-container
 ```
@@ -81,6 +82,42 @@ scripts/setup_blastdb.sh refseq_protein         # refuses if < MIN_FREE_GB free
 
 Keep the SSD as the hot path; a spinning NAS works for occasional queries but is
 slow and bad under concurrent evals.
+
+#### Fast protein search with DIAMOND (recommended for large protein DBs)
+
+`blastp` against `refseq_protein`/`nr` is slow enough that models burn their
+turn/time budget and time out — which is why a plain big BLAST DB often hurts
+more than it helps. [DIAMOND](https://github.com/bbuchfink/diamond) searches the
+same protein set orders of magnitude faster, so the model can do real
+identification locally instead of falling back to (slow, flaky) remote BLAST.
+`diamond` ships in the image, and the harness auto-detects any `*.dmnd` database
+and tells the model to query it with `diamond blastp -d NAME` / `diamond blastx`.
+
+`scripts/setup_diamond_db.sh` builds one. It pulls the source BLAST volumes from
+**NCBI's AWS Open Data mirror** (`s3://ncbi-blast-databases`), which is ~50× faster
+than NCBI FTP and resumable, **archives** them on slow/cheap storage, and writes
+the finished `.dmnd` to **local SSD** (DIAMOND memory-maps the db with random
+access at query time — a network/SMB mount is slower than the remote BLAST you're
+replacing):
+
+```bash
+# source archived on the NAS; .dmnd written to local SSD (the query hot path)
+ARCHIVE=/mnt/nas/datasets/ncbi OUT="$HOME/blastdb" \
+  scripts/setup_diamond_db.sh refseq_protein     # ~289 GB source -> ~120 GB .dmnd
+```
+
+Organism names come straight from the sequence deflines (nr/refseq titles carry
+`[Organism]`), so no NCBI taxonomy download is needed:
+
+```bash
+diamond blastp -d "$BLASTDB_DIR/refseq_protein" -q query.faa \
+  --outfmt 6 qseqid sseqid pident evalue stitle --max-target-seqs 5
+```
+
+> Throughput note: the practical limit is usually your own downlink, not the
+> mirror. On a ~64 Mbit/s line, ~289 GB of `refseq_protein` is an ~8–10 h
+> (resumable) background pull; `nr` (~664 GB) is ~a day. Pick the smallest DB that
+> covers your tasks — `refseq_protein` is curated and plenty for organism ID.
 
 ### 3. Run the eval (native tool-calling — recommended)
 

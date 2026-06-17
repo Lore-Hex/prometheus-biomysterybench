@@ -93,6 +93,7 @@ BIO_TOOL_COMMANDS = (
     "bedtools",
     "blastn",
     "blastp",
+    "diamond",
     "bwa",
     "minimap2",
     "seqkit",
@@ -244,6 +245,22 @@ def local_blast_databases(blastdb_dir: str | None) -> list[str]:
             stem = item.name.rsplit(".", 1)[0]
             names.add(re.sub(r"\.\d+$", "", stem))
     return sorted(names)
+
+
+def local_diamond_databases(blastdb_dir: str | None) -> list[str]:
+    """Return DIAMOND protein database names (``*.dmnd``) found in a directory.
+
+    DIAMOND databases are queried with ``diamond blastp -d NAME`` /
+    ``diamond blastx -d NAME`` and are dramatically faster than ``blastp``
+    against a large protein set (e.g. a DIAMOND build of ``nr``), so they are
+    advertised separately from the NCBI BLAST databases.
+    """
+    if not blastdb_dir:
+        return []
+    path = Path(blastdb_dir)
+    if not path.is_dir():
+        return []
+    return sorted({item.name[: -len(".dmnd")] for item in path.glob("*.dmnd")})
 
 
 def _json_post(
@@ -890,12 +907,21 @@ def solve_problem(
         else "disabled"
     )
     tools = container_tool_inventory(exec_image) if exec_image else tool_inventory()
-    blast_dbs = local_blast_databases(exec_blastdb or os.environ.get("BLASTDB"))
+    blastdb_dir = exec_blastdb or os.environ.get("BLASTDB")
+    blast_dbs = local_blast_databases(blastdb_dir)
+    diamond_dbs = local_diamond_databases(blastdb_dir)
     blast_note = (
         f"Local BLAST databases at $BLASTDB (query with blastp/blastn -db NAME): {', '.join(blast_dbs)}.\n\n"
         if blast_dbs
         else ""
     )
+    if diamond_dbs:
+        blast_note += (
+            "Local DIAMOND protein databases at $BLASTDB (query with "
+            "`diamond blastp -d NAME` for protein queries or `diamond blastx -d NAME` for "
+            "nucleotide queries; far faster than blastp for large databases): "
+            f"{', '.join(diamond_dbs)}.\n\n"
+        )
     system_prompt = (
         """\
         You are solving a BioMysteryBench task in a local working directory.

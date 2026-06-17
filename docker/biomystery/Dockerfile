@@ -15,6 +15,7 @@ RUN micromamba install -y -n base -c conda-forge -c bioconda \
     bwa \
     minimap2 \
     seqkit \
+    diamond \
     entrez-direct \
     biopython \
     pandas \

@@ -24,6 +24,7 @@ from prometheus_biomysterybench.biomystery import (
     grade_answer,
     local_blast_databases,
     local_claude_complete,
+    local_diamond_databases,
     parse_action,
     public_summary,
     safe_run_command,
@@ -692,3 +693,16 @@ def test_local_blast_databases_lists_query_targets_only(tmp_path: Path) -> None:
     assert local_blast_databases(str(tmp_path)) == ["pdbaa", "pdbnt", "refseq_protein", "swissprot"]
     assert local_blast_databases(None) == []
     assert local_blast_databases(str(tmp_path / "missing")) == []
+
+
+def test_local_diamond_databases_lists_dmnd_only(tmp_path: Path) -> None:
+    for name in (
+        "nr.dmnd",
+        "swissprot_diamond.dmnd",
+        "swissprot.pin",  # a BLAST db, must NOT show up as a DIAMOND db
+        "taxdb.btd",
+    ):
+        (tmp_path / name).write_bytes(b"")
+    assert local_diamond_databases(str(tmp_path)) == ["nr", "swissprot_diamond"]
+    assert local_diamond_databases(None) == []
+    assert local_diamond_databases(str(tmp_path / "missing")) == []
