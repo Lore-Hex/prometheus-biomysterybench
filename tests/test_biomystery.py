@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from prometheus_biomysterybench.biomystery import (
     aggregate,
     biomystery_tools,
     call_model,
+    ensure_full_dataset,
     expected_answers,
     format_tool_inventory,
     grade_answer,
@@ -26,6 +28,7 @@ from prometheus_biomysterybench.biomystery import (
     local_claude_complete,
     local_diamond_databases,
     parse_action,
+    prepare_run_dir,
     public_summary,
     safe_run_command,
 )
@@ -706,3 +709,41 @@ def test_local_diamond_databases_lists_dmnd_only(tmp_path: Path) -> None:
     assert local_diamond_databases(str(tmp_path)) == ["nr", "swissprot_diamond"]
     assert local_diamond_databases(None) == []
     assert local_diamond_databases(str(tmp_path / "missing")) == []
+
+
+def test_ensure_full_dataset_requires_problems_csv(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="BioMysteryBench-full"):
+        ensure_full_dataset(tmp_path)
+    (tmp_path / "problems.csv").write_text("id,question\n", encoding="utf-8")
+    assert ensure_full_dataset(tmp_path) == tmp_path
+
+
+def test_prepare_run_dir_full_extracts_task_zip(tmp_path: Path) -> None:
+    # full dataset: data/<id>.zip whose entries are the task files directly
+    data = tmp_path / "data"
+    data.mkdir()
+    with zipfile.ZipFile(data / "hb010.zip", "w") as zf:
+        zf.writestr("hb010-sequences.fasta", ">seq\nACGT\n")
+    run_dir = tmp_path / "runs" / "hb010"
+    run_dir.mkdir(parents=True)
+    (run_dir / "stale.txt").write_text("old", encoding="utf-8")  # must be wiped first
+
+    prepare_run_dir(tmp_path, "full", "hb010", run_dir)
+
+    assert (run_dir / "hb010-sequences.fasta").read_text(encoding="utf-8").startswith(">seq")
+    assert not (run_dir / "stale.txt").exists()
+
+    with pytest.raises(FileNotFoundError, match="missing task data"):
+        prepare_run_dir(tmp_path, "full", "hb999", tmp_path / "runs" / "hb999")
+
+
+def test_prepare_run_dir_preview_copies_extracted_tree(tmp_path: Path) -> None:
+    # preview dataset: pre-extracted data/<id>/ tree gets copied
+    task = tmp_path / "data" / "hb020"
+    task.mkdir(parents=True)
+    (task / "structure.pdb").write_text("ATOM\n", encoding="utf-8")
+    run_dir = tmp_path / "runs" / "hb020"
+
+    prepare_run_dir(tmp_path, "preview", "hb020", run_dir)
+
+    assert (run_dir / "structure.pdb").read_text(encoding="utf-8") == "ATOM\n"

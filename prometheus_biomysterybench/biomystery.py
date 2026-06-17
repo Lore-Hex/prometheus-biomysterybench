@@ -186,6 +186,46 @@ def task_dir(dataset_dir: Path, problem_id: str) -> Path:
     return path
 
 
+def ensure_full_dataset(full_dir: Path) -> Path:
+    """Use a pre-downloaded ``Anthropic/BioMysteryBench-full`` snapshot.
+
+    The full 99-task set is **gated** (request access on Hugging Face, then
+    ``snapshot_download('Anthropic/BioMysteryBench-full', repo_type='dataset')``).
+    Unlike the preview (one ``data.zip``), it ships ``problems.csv`` plus one
+    ``data/<id>.zip`` per task, so it is used in place rather than re-downloaded.
+    """
+    if not (full_dir / "problems.csv").exists():
+        raise SystemExit(
+            f"--dataset full needs a downloaded BioMysteryBench-full at {full_dir} "
+            "(problems.csv + data/<id>.zip). It is gated: request access to "
+            "Anthropic/BioMysteryBench-full on Hugging Face and snapshot_download it there "
+            "(set HF_TOKEN)."
+        )
+    return full_dir
+
+
+def prepare_run_dir(dataset_dir: Path, dataset_kind: str, problem_id: str, run_dir: Path) -> None:
+    """Materialize a task's files into a fresh per-run working directory.
+
+    preview: copy the pre-extracted ``data/<id>/`` tree.
+    full:    extract ``data/<id>.zip`` (its entries are the task files directly).
+    """
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    if dataset_kind == "full":
+        zip_path = dataset_dir / "data" / f"{problem_id}.zip"
+        if not zip_path.exists():
+            raise FileNotFoundError(
+                f"missing task data for {problem_id}: {zip_path} "
+                "(is the BioMysteryBench-full download complete?)"
+            )
+        run_dir.mkdir(parents=True)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(run_dir)
+    else:
+        shutil.copytree(task_dir(dataset_dir, problem_id), run_dir)
+
+
 def file_manifest(path: Path, *, max_files: int = 40) -> str:
     rows = []
     for item in sorted(p for p in path.rglob("*") if p.is_file())[:max_files]:
@@ -1288,6 +1328,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--models", default=None)
+    parser.add_argument(
+        "--dataset",
+        choices=("preview", "full"),
+        default="preview",
+        help="preview = public 5-task set (auto-downloaded); full = gated 99-task "
+        "Anthropic/BioMysteryBench-full (use --full-dataset-dir).",
+    )
+    parser.add_argument(
+        "--full-dataset-dir",
+        default=os.environ.get("BIOMYSTERY_FULL_DIR"),
+        help="Directory holding a downloaded BioMysteryBench-full snapshot "
+        "(problems.csv + data/<id>.zip); required for --dataset full. "
+        "Defaults to $BIOMYSTERY_FULL_DIR.",
+    )
+    parser.add_argument(
+        "--cleanup-task-data",
+        action="store_true",
+        help="Delete each task's extracted working dir after it is solved. "
+        "Recommended (and default-on) for --dataset full to bound disk use.",
+    )
     parser.add_argument("--work-root", default=".eval_work")
     parser.add_argument("--private-out", default=".eval_results_private/biomystery_preview_raw.json")
     parser.add_argument("--public-out", default="results/biomystery_preview_trustedrouter_2026-06-14.json")
@@ -1348,7 +1408,13 @@ def main(argv: list[str] | None = None) -> int:
         api_key = args.api_key or ""
     else:
         api_key = _api_key_from_env(args.api_key)
-    dataset_dir = ensure_preview_dataset(Path(args.work_root))
+    if args.dataset == "full":
+        if not args.full_dataset_dir:
+            raise SystemExit("--dataset full requires --full-dataset-dir (or $BIOMYSTERY_FULL_DIR)")
+        dataset_dir = ensure_full_dataset(Path(args.full_dataset_dir))
+    else:
+        dataset_dir = ensure_preview_dataset(Path(args.work_root))
+    cleanup_task_data = args.cleanup_task_data or args.dataset == "full"
     problems = load_problems(dataset_dir)
     if args.problem_ids:
         wanted = {p.strip() for p in args.problem_ids.split(",") if p.strip()}
@@ -1362,7 +1428,6 @@ def main(argv: list[str] | None = None) -> int:
     for model in models:
         for episode in range(1, max(1, args.episodes) + 1):
             for problem in problems:
-                source = task_dir(dataset_dir, problem.id)
                 run_dir = (
                     Path(args.work_root)
                     / "biomystery_runs"
@@ -1370,9 +1435,7 @@ def main(argv: list[str] | None = None) -> int:
                     / f"episode_{episode}"
                     / problem.id
                 )
-                if run_dir.exists():
-                    shutil.rmtree(run_dir)
-                shutil.copytree(source, run_dir)
+                prepare_run_dir(dataset_dir, args.dataset, problem.id, run_dir)
                 print(f"running {model} {problem.id} episode {episode}", flush=True)
                 raw_results.append(
                     solve_problem(
@@ -1400,6 +1463,8 @@ def main(argv: list[str] | None = None) -> int:
                         fusion_selection=args.fusion_selection,
                     )
                 )
+                if cleanup_task_data:
+                    shutil.rmtree(run_dir, ignore_errors=True)
 
     created_at = datetime.now(UTC).isoformat()
     harness_meta = {
@@ -1423,8 +1488,9 @@ def main(argv: list[str] | None = None) -> int:
             else None
         ),
     }
+    benchmark_label = f"BioMysteryBench-{args.dataset} reproduction"
     private_payload = {
-        "benchmark": "BioMysteryBench-preview reproduction",
+        "benchmark": benchmark_label,
         "created_at": created_at,
         "models": models,
         "harness": harness_meta,
@@ -1436,7 +1502,7 @@ def main(argv: list[str] | None = None) -> int:
 
     public_rows = public_summary(raw_results)
     public_payload = {
-        "benchmark": "BioMysteryBench-preview reproduction",
+        "benchmark": benchmark_label,
         "created_at": created_at,
         "models": models,
         "harness": harness_meta,

@@ -145,6 +145,34 @@ Swap `--models` for any OpenAI-compatible id (`openai/gpt-5.5`,
 `scripts/run_biomystery_preview_container.sh` runs the whole harness *inside*
 the container instead, if you prefer not to install anything on the host.
 
+#### Full 99-task benchmark (gated)
+
+The complete `Anthropic/BioMysteryBench-full` (99 tasks: 76 human-solvable +
+23 human-difficult) is **gated** — request access on its Hugging Face page,
+then snapshot it somewhere with room (~148 GB; the per-task `data/<id>.zip`
+bundles include a few large sequencing-read tasks):
+
+```bash
+HF_TOKEN=hf_... uv run --with huggingface_hub python -c \
+  "from huggingface_hub import snapshot_download as s; \
+   s('Anthropic/BioMysteryBench-full', repo_type='dataset', local_dir='/data/biomysterybench-full')"
+```
+
+Then point the harness at it with `--dataset full`. Each task's zip is extracted
+into a fresh working dir at run time and removed afterwards (`--dataset full`
+implies `--cleanup-task-data`, so disk stays bounded even across all 99):
+
+```bash
+export BIOMYSTERY_FULL_DIR=/data/biomysterybench-full
+uv run --with huggingface_hub python -m prometheus_biomysterybench.biomystery \
+  --dataset full --models anthropic/claude-opus-4.8 \
+  --exec-image prometheus-biomysterybench:latest --exec-blastdb "$BLASTDB_DIR" \
+  --native-tools --allow-network --episodes 1 --max-turns 60 \
+  --private-out .eval_results_private/opus48_full.json \
+  --public-out results/opus48_full.json
+# add --problem-ids hb022,hb053 to run just specific tasks
+```
+
 ### Offline alternative: local `claude` CLI (no API key)
 
 `--models local/claude-opus-4.8` drives the eval with your local `claude` CLI as
