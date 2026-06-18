@@ -1424,6 +1424,12 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"unknown problem ids: {', '.join(sorted(missing))}")
     if args.problem_limit:
         problems = problems[: args.problem_limit]
+    # Stream each task's result to a JSONL sidecar as it completes so a long
+    # run (e.g. all 99 tasks) survives an interruption — the final JSON is still
+    # written at the end, but completed work is never lost if the process dies.
+    partial_path = Path(args.private_out).with_name(Path(args.private_out).stem + ".partial.jsonl")
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path.write_text("", encoding="utf-8")
     raw_results = []
     for model in models:
         for episode in range(1, max(1, args.episodes) + 1):
@@ -1437,8 +1443,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 prepare_run_dir(dataset_dir, args.dataset, problem.id, run_dir)
                 print(f"running {model} {problem.id} episode {episode}", flush=True)
-                raw_results.append(
-                    solve_problem(
+                try:
+                    result = solve_problem(
                         base_url=args.base_url,
                         api_key=api_key,
                         model=model,
@@ -1462,7 +1468,23 @@ def main(argv: list[str] | None = None) -> int:
                         fusion_judge_model=args.fusion_judge_model,
                         fusion_selection=args.fusion_selection,
                     )
-                )
+                except Exception as exc:  # noqa: BLE001 - one bad task must not sink a 99-task run
+                    print(f"  ERROR on {problem.id}: {exc!r}", flush=True)
+                    result = {
+                        "model": model,
+                        "problem_id": problem.id,
+                        "episode": episode,
+                        "human_solvable": problem.human_solvable,
+                        "answer": "",
+                        "score": 0.0,
+                        "error": f"harness_exception: {exc!r}",
+                        "latency_ms": 0,
+                        "turns": 0,
+                        "usage": {},
+                    }
+                raw_results.append(result)
+                with partial_path.open("a", encoding="utf-8") as pf:
+                    pf.write(json.dumps(result) + "\n")
                 if cleanup_task_data:
                     shutil.rmtree(run_dir, ignore_errors=True)
 

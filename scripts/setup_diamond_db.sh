@@ -51,9 +51,19 @@ aws configure set default.s3.max_concurrent_requests 24 >/dev/null 2>&1 || true
 
 mkdir -p "${ARCHIVE}/${DB}"
 echo "[$(date +%H:%M:%S)] syncing ${DB} BLAST volumes from AWS mirror -> ${ARCHIVE}/${DB}"
-aws s3 sync --no-sign-request \
-  --exclude "*" --include "${DB}.*" \
-  "${BUCKET}/${SNAPSHOT}/" "${ARCHIVE}/${DB}/"
+# aws s3 sync exits non-zero if ANY file hit a transient error, even after the
+# rest succeed; over a multi-hundred-GB transfer that is common. Retry the
+# resumable sync (it only re-fetches what is missing) so one flake near the end
+# doesn't abort the whole multi-hour pull.
+for attempt in 1 2 3 4 5 6; do
+  if aws s3 sync --no-sign-request --exclude "*" --include "${DB}.*" \
+       "${BUCKET}/${SNAPSHOT}/" "${ARCHIVE}/${DB}/"; then
+    break
+  fi
+  [ "$attempt" -eq 6 ] && { echo "sync still failing after 6 attempts" >&2; exit 4; }
+  echo "[$(date +%H:%M:%S)] sync attempt ${attempt} hit transient errors; resuming..." >&2
+  sleep 20
+done
 # taxdb gives blastdbcmd readable organism strings during extraction
 aws s3 sync --no-sign-request \
   --exclude "*" --include "taxdb.*" \
