@@ -916,6 +916,50 @@ def grade_answer(answer: str, rubric: str) -> float:
     return 1.0 if normalize_answer(expected[0]) in normalized else 0.0
 
 
+def grade_answer_llm(
+    question: str,
+    answer: str,
+    rubric: str,
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    timeout: float = 120.0,
+) -> float:
+    """Grade the way BioMysteryBench rubrics intend: a judge model reads the
+    rubric (which states the correct answer + all-or-nothing criteria) and the
+    model's answer, and returns 1.0 (full credit) or 0.0. The heuristic
+    ``grade_answer`` only substring-matches an answer extracted from rubrics
+    phrased "answer is X", so it silently auto-fails the many full-set rubrics
+    with other phrasings; this is the faithful scorer for them."""
+    if not (answer or "").strip():
+        return 0.0
+    prompt = (
+        "You are grading a model's answer to a bioinformatics task against an official "
+        "benchmark rubric. The rubric is authoritative: it states the correct answer and "
+        "the grading criteria.\n\n"
+        f"# Task question\n{question}\n\n"
+        f"# Model's answer\n{answer}\n\n"
+        f"# Rubric (authoritative grading criteria)\n{rubric}\n\n"
+        "Apply the rubric exactly as written, honoring any 'all or nothing' / 'no partial "
+        "credit' instruction. Award full credit only if the model's answer satisfies the "
+        "rubric's criteria. Reply with ONLY a single character: 1 for full credit, 0 for none."
+    )
+    data = _json_post(
+        base_url.rstrip("/") + "/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        body={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 5,
+            "temperature": 0,
+        },
+        timeout=timeout,
+    )
+    text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    return 1.0 if text.strip()[:1] == "1" else 0.0
+
+
 def solve_problem(
     *,
     base_url: str,
@@ -940,6 +984,7 @@ def solve_problem(
     fusion_panel: Sequence[str] = DEFAULT_FUSION_PANEL,
     fusion_judge_model: str = DEFAULT_FUSION_JUDGE_MODEL,
     fusion_selection: str = DEFAULT_FUSION_SELECTION,
+    judge_model: str | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + task_timeout if task_timeout > 0 else None
@@ -1231,7 +1276,20 @@ def solve_problem(
     if exec_container:
         stop_exec_container(exec_container)
 
-    score = grade_answer(final, problem.answer_rubric) if final else 0.0
+    if not final:
+        score = 0.0
+    elif judge_model:
+        score = grade_answer_llm(
+            problem.question,
+            final,
+            problem.answer_rubric,
+            base_url=base_url,
+            api_key=api_key,
+            model=judge_model,
+            timeout=llm_timeout,
+        )
+    else:
+        score = grade_answer(final, problem.answer_rubric)
     return {
         "model": model,
         "problem_id": problem.id,
@@ -1355,6 +1413,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Reload <private_out>.partial.jsonl and skip already-finished tasks, "
         "so a killed long run can be relaunched to continue where it stopped.",
+    )
+    parser.add_argument(
+        "--judge-model",
+        default=None,
+        help="Grade answers with this model as an LLM judge applying the rubric "
+        "(e.g. anthropic/claude-opus-4.8) instead of the heuristic substring matcher. "
+        "Required for faithful scoring of the full set (its rubrics use varied phrasings).",
     )
     parser.add_argument(
         "--concurrency",
@@ -1495,6 +1560,7 @@ def main(argv: list[str] | None = None) -> int:
                 fusion_panel=fusion_panel,
                 fusion_judge_model=args.fusion_judge_model,
                 fusion_selection=args.fusion_selection,
+                judge_model=args.judge_model,
             )
         except Exception as exc:  # noqa: BLE001 - one bad task must not sink a multi-task run
             print(f"  ERROR on {problem.id}: {exc!r}", flush=True)

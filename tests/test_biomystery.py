@@ -24,6 +24,7 @@ from prometheus_biomysterybench.biomystery import (
     expected_answers,
     format_tool_inventory,
     grade_answer,
+    grade_answer_llm,
     local_blast_databases,
     local_claude_complete,
     local_diamond_databases,
@@ -696,6 +697,24 @@ def test_local_blast_databases_lists_query_targets_only(tmp_path: Path) -> None:
     assert local_blast_databases(str(tmp_path)) == ["pdbaa", "pdbnt", "refseq_protein", "swissprot"]
     assert local_blast_databases(None) == []
     assert local_blast_databases(str(tmp_path / "missing")) == []
+
+
+def test_grade_answer_llm_parses_verdict_and_skips_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_post(url: str, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs["body"])
+        verdict = "1" if "Lung" in kwargs["body"]["messages"][0]["content"] else "0"
+        return {"choices": [{"message": {"content": verdict}}]}
+
+    monkeypatch.setattr(biomystery_preview, "_json_post", fake_post)
+    kw = {"base_url": "https://x/v1", "api_key": "k", "model": "judge"}
+    # correct answer the heuristic substring-matcher would reject ("the lung" vs "Lung")
+    assert grade_answer_llm("organ?", "Lung", "Answer is the lung.", **kw) == 1.0
+    assert grade_answer_llm("organ?", "Spleen", "Answer is the lung.", **kw) == 0.0
+    # empty answer short-circuits to 0.0 without spending a judge call
+    assert grade_answer_llm("organ?", "  ", "Answer is the lung.", **kw) == 0.0
+    assert len(calls) == 2
 
 
 def test_local_diamond_databases_lists_dmnd_only(tmp_path: Path) -> None:
