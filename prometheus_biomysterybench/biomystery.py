@@ -11,12 +11,14 @@ import signal
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1354,6 +1356,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Reload <private_out>.partial.jsonl and skip already-finished tasks, "
         "so a killed long run can be relaunched to continue where it stopped.",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="Run this many tasks in parallel (each gets its own sandbox container "
+        "and API calls). >1 cuts wall-clock on a multi-task run; bound it by your "
+        "API rate limits and host resources. Default 1 (serial).",
+    )
     parser.add_argument("--work-root", default=".eval_work")
     parser.add_argument("--private-out", default=".eval_results_private/biomystery_preview_raw.json")
     parser.add_argument("--public-out", default="results/biomystery_preview_trustedrouter_2026-06-14.json")
@@ -1449,64 +1459,84 @@ def main(argv: list[str] | None = None) -> int:
         print(f"resuming: {len(done_cells)} task(s) already complete, skipping them", flush=True)
     else:
         partial_path.write_text("", encoding="utf-8")
-    for model in models:
-        for episode in range(1, max(1, args.episodes) + 1):
-            for problem in problems:
-                if (model, problem.id, episode) in done_cells:
-                    continue
-                run_dir = (
-                    Path(args.work_root)
-                    / "biomystery_runs"
-                    / normalize_answer(model)
-                    / f"episode_{episode}"
-                    / problem.id
-                )
-                prepare_run_dir(dataset_dir, args.dataset, problem.id, run_dir)
-                print(f"running {model} {problem.id} episode {episode}", flush=True)
-                try:
-                    result = solve_problem(
-                        base_url=args.base_url,
-                        api_key=api_key,
-                        model=model,
-                        problem=problem,
-                        episode=episode,
-                        workdir=run_dir,
-                        max_turns=args.max_turns,
-                        llm_timeout=args.llm_timeout,
-                        command_timeout=args.command_timeout,
-                        task_timeout=args.task_timeout,
-                        max_tokens=args.max_tokens,
-                        model_attempts=args.model_attempts,
-                        max_output_chars=args.max_output_chars,
-                        allow_network=args.allow_network,
-                        native_tools=args.native_tools,
-                        progress=not args.no_progress,
-                        local_model=args.local_claude_model,
-                        exec_image=args.exec_image,
-                        exec_blastdb=args.exec_blastdb,
-                        fusion_panel=fusion_panel,
-                        fusion_judge_model=args.fusion_judge_model,
-                        fusion_selection=args.fusion_selection,
-                    )
-                except Exception as exc:  # noqa: BLE001 - one bad task must not sink a 99-task run
-                    print(f"  ERROR on {problem.id}: {exc!r}", flush=True)
-                    result = {
-                        "model": model,
-                        "problem_id": problem.id,
-                        "episode": episode,
-                        "human_solvable": problem.human_solvable,
-                        "answer": "",
-                        "score": 0.0,
-                        "error": f"harness_exception: {exc!r}",
-                        "latency_ms": 0,
-                        "turns": 0,
-                        "usage": {},
-                    }
-                raw_results.append(result)
-                with partial_path.open("a", encoding="utf-8") as pf:
-                    pf.write(json.dumps(result) + "\n")
-                if cleanup_task_data:
-                    shutil.rmtree(run_dir, ignore_errors=True)
+    partial_lock = threading.Lock()
+
+    def run_one(model: str, episode: int, problem: Problem) -> dict[str, Any]:
+        run_dir = (
+            Path(args.work_root)
+            / "biomystery_runs"
+            / normalize_answer(model)
+            / f"episode_{episode}"
+            / problem.id
+        )
+        try:
+            prepare_run_dir(dataset_dir, args.dataset, problem.id, run_dir)
+            print(f"running {model} {problem.id} episode {episode}", flush=True)
+            result = solve_problem(
+                base_url=args.base_url,
+                api_key=api_key,
+                model=model,
+                problem=problem,
+                episode=episode,
+                workdir=run_dir,
+                max_turns=args.max_turns,
+                llm_timeout=args.llm_timeout,
+                command_timeout=args.command_timeout,
+                task_timeout=args.task_timeout,
+                max_tokens=args.max_tokens,
+                model_attempts=args.model_attempts,
+                max_output_chars=args.max_output_chars,
+                allow_network=args.allow_network,
+                native_tools=args.native_tools,
+                progress=not args.no_progress,
+                local_model=args.local_claude_model,
+                exec_image=args.exec_image,
+                exec_blastdb=args.exec_blastdb,
+                fusion_panel=fusion_panel,
+                fusion_judge_model=args.fusion_judge_model,
+                fusion_selection=args.fusion_selection,
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad task must not sink a multi-task run
+            print(f"  ERROR on {problem.id}: {exc!r}", flush=True)
+            result = {
+                "model": model,
+                "problem_id": problem.id,
+                "episode": episode,
+                "human_solvable": problem.human_solvable,
+                "answer": "",
+                "score": 0.0,
+                "error": f"harness_exception: {exc!r}",
+                "latency_ms": 0,
+                "turns": 0,
+                "usage": {},
+            }
+        with partial_lock, partial_path.open("a", encoding="utf-8") as pf:
+            pf.write(json.dumps(result) + "\n")
+        if cleanup_task_data:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        return result
+
+    work = [
+        (model, episode, problem)
+        for model in models
+        for episode in range(1, max(1, args.episodes) + 1)
+        for problem in problems
+        if (model, problem.id, episode) not in done_cells
+    ]
+    concurrency = max(1, args.concurrency)
+    if concurrency > 1 and len(work) > 1:
+        # Warm the per-image tool-inventory cache once so worker threads don't
+        # each spawn a redundant docker probe at startup.
+        if args.exec_image:
+            container_tool_inventory(args.exec_image)
+        print(f"running {len(work)} task(s) at concurrency {concurrency}", flush=True)
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = [pool.submit(run_one, m, e, p) for (m, e, p) in work]
+            for fut in as_completed(futures):
+                raw_results.append(fut.result())
+    else:
+        for model, episode, problem in work:
+            raw_results.append(run_one(model, episode, problem))
 
     created_at = datetime.now(UTC).isoformat()
     harness_meta = {
