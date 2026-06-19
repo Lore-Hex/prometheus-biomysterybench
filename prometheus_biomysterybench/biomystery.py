@@ -1348,6 +1348,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Delete each task's extracted working dir after it is solved. "
         "Recommended (and default-on) for --dataset full to bound disk use.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reload <private_out>.partial.jsonl and skip already-finished tasks, "
+        "so a killed long run can be relaunched to continue where it stopped.",
+    )
     parser.add_argument("--work-root", default=".eval_work")
     parser.add_argument("--private-out", default=".eval_results_private/biomystery_preview_raw.json")
     parser.add_argument("--public-out", default="results/biomystery_preview_trustedrouter_2026-06-14.json")
@@ -1427,13 +1433,27 @@ def main(argv: list[str] | None = None) -> int:
     # Stream each task's result to a JSONL sidecar as it completes so a long
     # run (e.g. all 99 tasks) survives an interruption — the final JSON is still
     # written at the end, but completed work is never lost if the process dies.
+    # With --resume, reload that sidecar and skip already-finished (model,
+    # problem, episode) cells so a killed run can simply be relaunched.
     partial_path = Path(args.private_out).with_name(Path(args.private_out).stem + ".partial.jsonl")
     partial_path.parent.mkdir(parents=True, exist_ok=True)
-    partial_path.write_text("", encoding="utf-8")
     raw_results = []
+    done_cells: set[tuple[str, str, int]] = set()
+    if args.resume and partial_path.exists():
+        for line in partial_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            raw_results.append(row)
+            done_cells.add((row["model"], row["problem_id"], int(row.get("episode", 1))))
+        print(f"resuming: {len(done_cells)} task(s) already complete, skipping them", flush=True)
+    else:
+        partial_path.write_text("", encoding="utf-8")
     for model in models:
         for episode in range(1, max(1, args.episodes) + 1):
             for problem in problems:
+                if (model, problem.id, episode) in done_cells:
+                    continue
                 run_dir = (
                     Path(args.work_root)
                     / "biomystery_runs"
