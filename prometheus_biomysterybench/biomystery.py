@@ -985,6 +985,7 @@ def solve_problem(
     fusion_judge_model: str = DEFAULT_FUSION_JUDGE_MODEL,
     fusion_selection: str = DEFAULT_FUSION_SELECTION,
     judge_model: str | None = None,
+    token_budget: int | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + task_timeout if task_timeout > 0 else None
@@ -1054,6 +1055,7 @@ def solve_problem(
     ]
     transcript: list[dict[str, Any]] = []
     usage_totals: dict[str, int] = {}
+    context_tokens = 0  # size of the running context (last call's prompt tokens)
     final = ""
     error = ""
 
@@ -1078,6 +1080,13 @@ def solve_problem(
             break
         if deadline is not None and time.monotonic() >= deadline:
             error = "task_timeout"
+            break
+        # Budget the task by context (no compaction): stop once the running
+        # context has reached the token budget, like Anthropic's ~1M / 980k-token
+        # agentic-eval budget — rather than a fixed turn cap that strangles a
+        # model mid-analysis.
+        if token_budget and context_tokens >= token_budget:
+            error = "token_budget_exhausted"
             break
         try:
             request_timeout = llm_timeout
@@ -1115,6 +1124,7 @@ def solve_problem(
         for key, value in usage.items():
             if isinstance(value, int):
                 usage_totals[key] = usage_totals.get(key, 0) + value
+        context_tokens = usage.get("prompt_tokens", 0) or context_tokens
 
         if native_tools and tool_calls:
             messages.append({"role": "assistant", "content": text or "", "tool_calls": tool_calls})
@@ -1433,6 +1443,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--private-out", default=".eval_results_private/biomystery_preview_raw.json")
     parser.add_argument("--public-out", default="results/biomystery_preview_trustedrouter_2026-06-14.json")
     parser.add_argument("--max-turns", type=int, default=50)
+    parser.add_argument(
+        "--token-budget",
+        type=int,
+        default=None,
+        help="Stop a task once its running context reaches this many tokens (no "
+        "compaction), matching Anthropic's ~1M/980k-token agentic-eval budget. "
+        "Set --max-turns high so this, not the turn count, is the binding limit.",
+    )
     parser.add_argument("--llm-timeout", type=float, default=240)
     parser.add_argument("--command-timeout", type=float, default=600)
     parser.add_argument("--task-timeout", type=float, default=1800)
@@ -1561,6 +1579,7 @@ def main(argv: list[str] | None = None) -> int:
                 fusion_judge_model=args.fusion_judge_model,
                 fusion_selection=args.fusion_selection,
                 judge_model=args.judge_model,
+                token_budget=args.token_budget,
             )
         except Exception as exc:  # noqa: BLE001 - one bad task must not sink a multi-task run
             print(f"  ERROR on {problem.id}: {exc!r}", flush=True)
