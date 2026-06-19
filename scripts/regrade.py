@@ -76,7 +76,8 @@ def main() -> int:
     print(json.dumps(agg, indent=2))
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.out).write_text(json.dumps({"judge_model": args.judge_model, "aggregate": agg, "results": judged}, indent=2))
+        payload = {"judge_model": args.judge_model, "aggregate": agg, "results": judged}
+        Path(args.out).write_text(json.dumps(payload, indent=2))
         print(f"wrote {args.out}", file=sys.stderr)
     return 0
 
