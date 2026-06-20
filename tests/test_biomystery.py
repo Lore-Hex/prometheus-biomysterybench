@@ -699,6 +699,39 @@ def test_local_blast_databases_lists_query_targets_only(tmp_path: Path) -> None:
     assert local_blast_databases(str(tmp_path / "missing")) == []
 
 
+def test_wandering_loop_ends_task_on_repeated_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # a model stuck re-running the identical command every turn
+    tool_call = {
+        "type": "function",
+        "id": "c1",
+        "function": {"name": "run_shell", "arguments": '{"command": "grep x f"}'},
+    }
+
+    def fake_call_model(**kwargs: Any) -> tuple[str, dict[str, int], list[dict[str, Any]]]:
+        return ("", {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}, [tool_call])
+
+    runs = {"n": 0}
+
+    def fake_run(*args: Any, **kwargs: Any) -> tuple[int, str]:
+        runs["n"] += 1
+        return (0, "same output")
+
+    monkeypatch.setattr(biomystery_preview, "call_model", fake_call_model)
+    monkeypatch.setattr(biomystery_preview, "safe_run_command", fake_run)
+    result = biomystery_preview.solve_problem(
+        base_url="https://x/v1", api_key="k", model="m",
+        problem=Problem(id="t", question="q", answer_rubric="Answer is z.", allowed_domains=(), human_solvable="yes"),
+        episode=1, workdir=tmp_path / "run", max_turns=500, llm_timeout=5, command_timeout=5,
+        task_timeout=0, max_tokens=64, model_attempts=1, max_output_chars=1000, allow_network=False,
+        native_tools=True, progress=False, loop_repeat_limit=4,
+    )
+    assert result["error"] == "wandering_loop"
+    assert result["score"] == 0.0
+    assert runs["n"] == 3  # ran the command 3x; the 4th occurrence trips the limit before executing
+
+
 def test_grade_answer_llm_parses_verdict_and_skips_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 

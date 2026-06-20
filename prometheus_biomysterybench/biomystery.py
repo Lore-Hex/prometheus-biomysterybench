@@ -986,6 +986,7 @@ def solve_problem(
     fusion_selection: str = DEFAULT_FUSION_SELECTION,
     judge_model: str | None = None,
     token_budget: int | None = None,
+    loop_repeat_limit: int = 0,
 ) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + task_timeout if task_timeout > 0 else None
@@ -1056,6 +1057,7 @@ def solve_problem(
     transcript: list[dict[str, Any]] = []
     usage_totals: dict[str, int] = {}
     context_tokens = 0  # size of the running context (last call's prompt tokens)
+    cmd_counts: dict[str, int] = {}  # for loop/wandering detection
     final = ""
     error = ""
 
@@ -1176,6 +1178,11 @@ def solve_problem(
                     )
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": output})
                     continue
+                norm = re.sub(r"\s+", " ", command).strip()
+                cmd_counts[norm] = cmd_counts.get(norm, 0) + 1
+                if loop_repeat_limit and cmd_counts[norm] >= loop_repeat_limit:
+                    error = "wandering_loop"
+                    break
                 run_timeout = command_timeout
                 requested_timeout = tool_args.get("timeout_seconds")
                 if isinstance(requested_timeout, int | float):
@@ -1248,6 +1255,11 @@ def solve_problem(
         command = action.get("cmd", "")
         if not command:
             error = "invalid_action"
+            break
+        norm = re.sub(r"\s+", " ", command).strip()
+        cmd_counts[norm] = cmd_counts.get(norm, 0) + 1
+        if loop_repeat_limit and cmd_counts[norm] >= loop_repeat_limit:
+            error = "wandering_loop"
             break
         run_timeout = command_timeout
         if deadline is not None:
@@ -1451,6 +1463,15 @@ def main(argv: list[str] | None = None) -> int:
         "compaction), matching Anthropic's ~1M/980k-token agentic-eval budget. "
         "Set --max-turns high so this, not the turn count, is the binding limit.",
     )
+    parser.add_argument(
+        "--loop-repeat-limit",
+        type=int,
+        default=0,
+        help="End a task as a wandering loop once it has issued the same shell "
+        "command this many times (0 = off). Catches a model stuck re-running "
+        "identical commands without progress, so a big token budget isn't burned "
+        "on a useless loop.",
+    )
     parser.add_argument("--llm-timeout", type=float, default=240)
     parser.add_argument("--command-timeout", type=float, default=600)
     parser.add_argument("--task-timeout", type=float, default=1800)
@@ -1580,6 +1601,7 @@ def main(argv: list[str] | None = None) -> int:
                 fusion_selection=args.fusion_selection,
                 judge_model=args.judge_model,
                 token_budget=args.token_budget,
+                loop_repeat_limit=args.loop_repeat_limit,
             )
         except Exception as exc:  # noqa: BLE001 - one bad task must not sink a multi-task run
             print(f"  ERROR on {problem.id}: {exc!r}", flush=True)
