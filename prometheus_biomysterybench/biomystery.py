@@ -1058,7 +1058,6 @@ def solve_problem(
     usage_totals: dict[str, int] = {}
     context_tokens = 0  # size of the running context (last call's prompt tokens)
     cmd_counts: dict[str, int] = {}  # exact-command repeats, for loop detection
-    cmd_prefix_counts: dict[str, int] = {}  # near-identical (prefix) repeats
     final = ""
     error = ""
 
@@ -1181,11 +1180,7 @@ def solve_problem(
                     continue
                 norm = re.sub(r"\s+", " ", command).strip()
                 cmd_counts[norm] = cmd_counts.get(norm, 0) + 1
-                cmd_prefix_counts[norm[:60]] = cmd_prefix_counts.get(norm[:60], 0) + 1
-                if loop_repeat_limit and (
-                    cmd_counts[norm] >= loop_repeat_limit
-                    or cmd_prefix_counts[norm[:60]] >= 2 * loop_repeat_limit
-                ):
+                if loop_repeat_limit and cmd_counts[norm] >= loop_repeat_limit:
                     error = "wandering_loop"
                     break
                 run_timeout = command_timeout
@@ -1263,11 +1258,7 @@ def solve_problem(
             break
         norm = re.sub(r"\s+", " ", command).strip()
         cmd_counts[norm] = cmd_counts.get(norm, 0) + 1
-        cmd_prefix_counts[norm[:60]] = cmd_prefix_counts.get(norm[:60], 0) + 1
-        if loop_repeat_limit and (
-            cmd_counts[norm] >= loop_repeat_limit
-            or cmd_prefix_counts[norm[:60]] >= 2 * loop_repeat_limit
-        ):
+        if loop_repeat_limit and cmd_counts[norm] >= loop_repeat_limit:
             error = "wandering_loop"
             break
         run_timeout = command_timeout
