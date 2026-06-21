@@ -987,6 +987,7 @@ def solve_problem(
     judge_model: str | None = None,
     token_budget: int | None = None,
     loop_repeat_limit: int = 0,
+    force_answer_on_loop: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + task_timeout if task_timeout > 0 else None
@@ -1058,6 +1059,7 @@ def solve_problem(
     usage_totals: dict[str, int] = {}
     context_tokens = 0  # size of the running context (last call's prompt tokens)
     cmd_counts: dict[str, int] = {}  # exact-command repeats, for loop detection
+    forced_submit = False  # whether we've already nudged the model to submit on a loop
     final = ""
     error = ""
 
@@ -1181,6 +1183,26 @@ def solve_problem(
                 norm = re.sub(r"\s+", " ", command).strip()
                 cmd_counts[norm] = cmd_counts.get(norm, 0) + 1
                 if loop_repeat_limit and cmd_counts[norm] >= loop_repeat_limit:
+                    if force_answer_on_loop and not forced_submit:
+                        forced_submit = True
+                        nudge = (
+                            f"You have run this exact command {cmd_counts[norm]} times with "
+                            "no new information — you are stuck in a loop. Do NOT run any more "
+                            "commands. Call submit_answer NOW with your single best final "
+                            "answer, based only on the evidence you have already gathered."
+                        )
+                        transcript.append(
+                            {
+                                "turn": turn,
+                                "assistant": text[:4000],
+                                "action": {"tool": tool_name, "cmd": command, "forced_submit": True},
+                                "tool_call_id": tool_call_id,
+                                "returncode": 0,
+                                "output": "[loop detected — forced submit nudge]",
+                            }
+                        )
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": nudge})
+                        continue
                     error = "wandering_loop"
                     break
                 run_timeout = command_timeout
@@ -1259,6 +1281,22 @@ def solve_problem(
         norm = re.sub(r"\s+", " ", command).strip()
         cmd_counts[norm] = cmd_counts.get(norm, 0) + 1
         if loop_repeat_limit and cmd_counts[norm] >= loop_repeat_limit:
+            if force_answer_on_loop and not forced_submit:
+                forced_submit = True
+                transcript[-1]["action"]["forced_submit"] = True
+                messages.append({"role": "assistant", "content": json.dumps({"cmd": command})})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You have run this exact command repeatedly with no new "
+                            "information — you are looping. Do NOT run more commands. Reply "
+                            'with exactly one JSON object giving your best final answer now: '
+                            '{"final": "..."}.'
+                        ),
+                    }
+                )
+                continue
             error = "wandering_loop"
             break
         run_timeout = command_timeout
@@ -1472,6 +1510,15 @@ def main(argv: list[str] | None = None) -> int:
         "identical commands without progress, so a big token budget isn't burned "
         "on a useless loop.",
     )
+    parser.add_argument(
+        "--force-answer-on-loop",
+        action="store_true",
+        help="When the loop detector fires, instead of immediately scoring the task "
+        "as a wandering loop, give the model one forced turn to submit its best final "
+        "answer based on what it already gathered (it is told to stop and submit, NOT "
+        "given the answer). Recovers tasks where the model found the answer but looped "
+        "without submitting. If it loops again after the nudge, it is scored a loop.",
+    )
     parser.add_argument("--llm-timeout", type=float, default=240)
     parser.add_argument("--command-timeout", type=float, default=600)
     parser.add_argument("--task-timeout", type=float, default=1800)
@@ -1602,6 +1649,7 @@ def main(argv: list[str] | None = None) -> int:
                 judge_model=args.judge_model,
                 token_budget=args.token_budget,
                 loop_repeat_limit=args.loop_repeat_limit,
+                force_answer_on_loop=args.force_answer_on_loop,
             )
         except Exception as exc:  # noqa: BLE001 - one bad task must not sink a multi-task run
             print(f"  ERROR on {problem.id}: {exc!r}", flush=True)
