@@ -538,26 +538,80 @@ def _extract_action_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _local_action_to_tool_calls(result_text: str) -> list[dict[str, Any]]:
-    action = _extract_action_object(result_text)
-    if not isinstance(action, dict):
-        return []
+_FUNCTION_CALLS_BLOCK = re.compile(r"<function_calls>(.*?)</function_calls>", re.S | re.I)
+_ACTION_KEYS = {"tool", "command", "answer", "cmd", "final"}
+
+
+def _action_to_tool_call(action: dict[str, Any]) -> dict[str, Any] | None:
     tool = action.get("tool")
     answer = action.get("answer")
     command = action.get("command")
     if tool == "submit_answer" and isinstance(answer, str):
-        return [_make_tool_call("submit_answer", {"answer": answer})]
+        return _make_tool_call("submit_answer", {"answer": answer})
     if tool == "run_shell" and isinstance(command, str):
         args: dict[str, Any] = {"command": command}
         timeout_seconds = action.get("timeout_seconds")
         if isinstance(timeout_seconds, int) and not isinstance(timeout_seconds, bool):
             args["timeout_seconds"] = timeout_seconds
-        return [_make_tool_call("run_shell", args)]
+        return _make_tool_call("run_shell", args)
     if isinstance(action.get("final"), str):
-        return [_make_tool_call("submit_answer", {"answer": action["final"]})]
+        return _make_tool_call("submit_answer", {"answer": action["final"]})
     if isinstance(action.get("cmd"), str):
-        return [_make_tool_call("run_shell", {"command": action["cmd"]})]
-    return []
+        return _make_tool_call("run_shell", {"command": action["cmd"]})
+    return None
+
+
+def _actions_from_function_calls(text: str) -> list[dict[str, Any]]:
+    """Parse ``<function_calls>[{...}]</function_calls>`` blocks in reading order.
+
+    Smaller models (e.g. Haiku) ignore the one-action-per-turn protocol and narrate
+    a whole multi-step investigation in a single response using Anthropic-style
+    ``<function_calls>`` blocks, ending in a *hallucinated* final answer. We must
+    take the FIRST action: a submit_answer that follows un-executed commands is
+    premature (the model never saw their real output). Grounding the first command
+    in real output forces genuine step-by-step investigation.
+    """
+    blocks = _FUNCTION_CALLS_BLOCK.findall(text)
+    if not blocks and "<function_calls>" in text.lower():
+        idx = text.lower().index("<function_calls>")
+        blocks = [text[idx + len("<function_calls>") :]]
+    decoder = json.JSONDecoder()
+    actions: list[dict[str, Any]] = []
+    for block in blocks:
+        for match in re.finditer(r"\{", block):
+            try:
+                data, _end = decoder.raw_decode(block[match.start() :])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict) and (_ACTION_KEYS & data.keys()):
+                actions.append(data)
+    return actions
+
+
+def _local_action_to_tool_calls(result_text: str) -> list[dict[str, Any]]:
+    # Haiku-style multi-step narration: take the first actionable call from any
+    # <function_calls> block (a later submit hasn't seen earlier commands' output).
+    for action in _actions_from_function_calls(result_text):
+        tool_call = _action_to_tool_call(action)
+        if tool_call is not None:
+            return [tool_call]
+    # Reason-then-commit models: take the last action object in the text.
+    action = _extract_action_object(result_text)
+    if not isinstance(action, dict):
+        return []
+    tool_call = _action_to_tool_call(action)
+    return [tool_call] if tool_call is not None else []
+
+
+def _load_partner_advice(advice_dir: str | None, problem_id: str) -> str | None:
+    """Load <advice_dir>/<problem_id>.txt if present (partner-model advice)."""
+    if not advice_dir:
+        return None
+    path = Path(advice_dir) / f"{problem_id}.txt"
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8").strip()
+    return text or None
 
 
 def local_claude_complete(
@@ -988,6 +1042,7 @@ def solve_problem(
     token_budget: int | None = None,
     loop_repeat_limit: int = 0,
     force_answer_on_loop: bool = False,
+    partner_advice: str | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + task_timeout if task_timeout > 0 else None
@@ -1055,6 +1110,20 @@ def solve_problem(
             ),
         },
     ]
+    if partner_advice:
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "A partner analyst, glm-5.2, has ALREADY investigated this task. Below is "
+                    "glm-5.2's full investigation: the shell commands it ran (its strategy), "
+                    "their outputs, any notes, and its final conclusion. Use this as ADVICE to "
+                    "guide your own work — but verify it with your own run_shell commands and "
+                    "reach your own answer (glm is imperfect and sometimes never concluded).\n\n"
+                    "=== glm-5.2's investigation ===\n" + partner_advice
+                ),
+            }
+        )
     transcript: list[dict[str, Any]] = []
     usage_totals: dict[str, int] = {}
     context_tokens = 0  # size of the running context (last call's prompt tokens)
@@ -1519,6 +1588,14 @@ def main(argv: list[str] | None = None) -> int:
         "given the answer). Recovers tasks where the model found the answer but looped "
         "without submitting. If it loops again after the nudge, it is scored a loop.",
     )
+    parser.add_argument(
+        "--partner-advice-dir",
+        default=None,
+        help="Directory of per-task partner-advice files (<problem_id>.txt). When set, "
+        "each file's contents are injected into the solver's initial context as advice "
+        "from a partner analyst (e.g. another model's replayed investigation). Lets a "
+        "model solve with tools while seeded by another model's prior work.",
+    )
     parser.add_argument("--llm-timeout", type=float, default=240)
     parser.add_argument("--command-timeout", type=float, default=600)
     parser.add_argument("--task-timeout", type=float, default=1800)
@@ -1650,6 +1727,7 @@ def main(argv: list[str] | None = None) -> int:
                 token_budget=args.token_budget,
                 loop_repeat_limit=args.loop_repeat_limit,
                 force_answer_on_loop=args.force_answer_on_loop,
+                partner_advice=_load_partner_advice(args.partner_advice_dir, problem.id),
             )
         except Exception as exc:  # noqa: BLE001 - one bad task must not sink a multi-task run
             print(f"  ERROR on {problem.id}: {exc!r}", flush=True)

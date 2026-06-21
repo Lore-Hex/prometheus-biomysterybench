@@ -531,6 +531,23 @@ def test_local_action_to_tool_calls_tolerates_json_mode_keys() -> None:
     assert _local_action_to_tool_calls("not json at all") == []
 
 
+def test_local_action_to_tool_calls_takes_first_command_from_function_calls() -> None:
+    # Smaller models narrate a whole investigation in one response, ending in a
+    # hallucinated answer. We must execute the FIRST command, not the premature submit.
+    text = (
+        "I'll inspect the data.\n"
+        '<function_calls>\n[{"tool":"run_shell","command":"head file.fasta","timeout_seconds":10}]\n</function_calls>\n'
+        "Now stats:\n"
+        '<function_calls>\n[{"tool":"run_shell","command":"seqkit stats file.fasta"}]\n</function_calls>\n'
+        'The organism is clear.\n<function_calls>\n[{"tool":"submit_answer","answer":"Bacillus simplex"}]\n</function_calls>'
+    )
+    tool_calls = _local_action_to_tool_calls(text)
+    assert tool_calls[0]["function"]["name"] == "run_shell"
+    args = json.loads(tool_calls[0]["function"]["arguments"])
+    assert args["command"] == "head file.fasta"
+    assert args["timeout_seconds"] == 10
+
+
 def test_map_claude_usage_sums_cache_and_output_tokens() -> None:
     usage = _map_claude_usage(
         {
