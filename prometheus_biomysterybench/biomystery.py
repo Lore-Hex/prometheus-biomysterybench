@@ -35,6 +35,7 @@ DEFAULT_MODELS = (
 FINAL_RE = re.compile(r"FINAL_ANSWER\s*:\s*(.+)", re.IGNORECASE | re.DOTALL)
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 LOCAL_MODEL_PREFIX = "local/"
+AGENTIC_MODEL_PREFIX = "agent/"  # genuine tool-use loop via the claude CLI + MCP shell tool
 DEFAULT_LOCAL_CLAUDE_MODEL = "claude-opus-4-8"
 EXEC_TIMEOUT_BACKSTOP = 20.0
 _LOCAL_NATIVE_INSTRUCTION = (
@@ -723,6 +724,89 @@ def _docker_exec_argv(container: str, command: str, timeout: float) -> list[str]
     return ["docker", "exec", "-w", "/work", container, "bash", "-lc", inner]
 
 
+def agentic_claude_solve(
+    *,
+    problem: Any,
+    container: str,
+    local_model: str,
+    workdir: Path,
+    blast_note: str,
+    allow_network: bool,
+    max_turns: int,
+    timeout: float,
+    partner_advice: str | None = None,
+) -> tuple[str, list[dict[str, Any]], dict[str, int], str]:
+    """Solve a task with a GENUINE tool-use loop instead of the text-oracle.
+
+    The local ``claude`` CLI runs an agentic session whose ``run_shell`` MCP tool
+    executes REAL commands in the task's sandbox container — so the model gets real
+    output and cannot hallucinate results. Returns (final, transcript, usage, error).
+    """
+    mcp_server = Path(__file__).resolve().parent.parent / "scripts" / "docker_shell_mcp.py"
+    cfg = {
+        "mcpServers": {
+            "shell": {
+                "command": "uv",
+                "args": ["run", "--with", "mcp", "python", str(mcp_server)],
+                "env": {"BIOMYSTERY_EXEC_CONTAINER": container},
+            }
+        }
+    }
+    cfg_path = workdir / "_mcp_config.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    net = "available" if allow_network else "disabled"
+    advice_block = ""
+    if partner_advice:
+        advice_block = (
+            "\n\nA partner analyst, glm-5.2, has already investigated this task. Below is its full "
+            "work — the commands it ran, their outputs, and its final conclusion — as ADVICE. Use it "
+            "to guide you, but verify with your own run_shell commands and reach your own answer "
+            "(glm is imperfect and sometimes never concluded).\n\n=== glm-5.2's investigation ===\n"
+            + partner_advice
+        )
+    prompt = (
+        "Solve this BioMysteryBench task. Use the run_shell tool to run real shell commands in the "
+        "working directory /work, which holds the input file(s). Bioinformatics tools and any BLAST "
+        f"databases at /blastdb are available; network is {net}. {blast_note}"
+        "Investigate the data with real commands, then determine the answer.\n\n"
+        f"QUESTION: {problem.question}\n\n"
+        "End your reply with a line exactly: FINAL ANSWER: <short biological answer>" + advice_block
+    )
+    argv = [
+        "claude", "-p", prompt,
+        "--model", local_model,
+        "--mcp-config", str(cfg_path),
+        "--allowedTools", "mcp__shell__run_shell",
+        "--max-turns", str(max_turns),
+        "--output-format", "json",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+    ]
+    try:
+        completed = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
+        )
+    except subprocess.TimeoutExpired:
+        return "", [{"turn": 1, "action": {"agentic": True}, "output": "agentic CLI timed out"}], {}, "agentic_timeout"
+    data = _parse_claude_cli_json(completed.stdout)
+    if not isinstance(data, dict) or not data.get("result"):
+        snippet = (completed.stderr or completed.stdout or "")[:300]
+        return "", [], {}, f"agentic_no_result: {snippet}"
+    result_text = str(data.get("result") or "")
+    match = re.search(r"FINAL ANSWER:\s*(.+)", result_text, re.IGNORECASE | re.DOTALL)
+    final = (match.group(1) if match else result_text).strip().strip("*").strip()[:2000]
+    usage = _map_claude_usage(data.get("usage"))
+    turns = int(data.get("num_turns") or 0)
+    transcript = [
+        {
+            "turn": turns,
+            "assistant": result_text[:4000],
+            "action": {"tool": "submit_answer", "final": bool(final), "agentic": True},
+        }
+    ]
+    return final, transcript, usage, ""
+
+
 def call_model(
     *,
     base_url: str,
@@ -1043,6 +1127,7 @@ def solve_problem(
     loop_repeat_limit: int = 0,
     force_answer_on_loop: bool = False,
     partner_advice: str | None = None,
+    min_commands_before_answer: int = 0,
 ) -> dict[str, Any]:
     started = time.monotonic()
     deadline = started + task_timeout if task_timeout > 0 else None
@@ -1129,6 +1214,7 @@ def solve_problem(
     context_tokens = 0  # size of the running context (last call's prompt tokens)
     cmd_counts: dict[str, int] = {}  # exact-command repeats, for loop detection
     forced_submit = False  # whether we've already nudged the model to submit on a loop
+    answer_pushbacks = 0  # times we refused a too-early answer (grounding guard)
     final = ""
     error = ""
 
@@ -1147,7 +1233,25 @@ def solve_problem(
         except Exception as exc:  # noqa: BLE001
             container_error = f"exec_container_failed: {type(exc).__name__}: {exc}"
 
+    agentic = model.startswith(AGENTIC_MODEL_PREFIX)
+    if agentic and exec_container and not container_error:
+        final, transcript, usage_totals, error = agentic_claude_solve(
+            problem=problem,
+            container=exec_container,
+            local_model=local_model,
+            workdir=workdir,
+            blast_note=blast_note,
+            allow_network=allow_network,
+            max_turns=max_turns,
+            timeout=task_timeout if task_timeout > 0 else 3600.0,
+            partner_advice=partner_advice,
+        )
+    elif agentic and not exec_container:
+        error = error or container_error or "agentic_requires_exec_container"
+
     for turn in range(1, max_turns + 1):
+        if agentic:
+            break
         if container_error:
             error = container_error
             break
@@ -1207,7 +1311,43 @@ def solve_problem(
                 tool_call_id = str(tool_call.get("id") or f"call_{turn}_{index}")
                 if tool_name == "submit_answer":
                     answer = tool_args.get("answer")
-                    final = answer.strip() if isinstance(answer, str) else ""
+                    candidate = answer.strip() if isinstance(answer, str) else ""
+                    distinct_cmds = list(cmd_counts.keys())
+                    if (
+                        candidate
+                        and min_commands_before_answer
+                        and len(distinct_cmds) < min_commands_before_answer
+                        and answer_pushbacks < 3
+                    ):
+                        # Grounding guard: a model (esp. a small one) may fabricate analysis it
+                        # never ran and submit on it. Refuse, throw its REAL command list back,
+                        # and force it to actually run the decisive analysis first.
+                        answer_pushbacks += 1
+                        transcript.append(
+                            {
+                                "turn": turn,
+                                "assistant": text[:4000],
+                                "action": {"tool": tool_name, "rejected_early": True},
+                                "tool_call_id": tool_call_id,
+                            }
+                        )
+                        ran = "\n".join(f"  - {c}" for c in distinct_cmds) or "  (none)"
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "content": (
+                                    "You tried to submit an answer, but you have ACTUALLY executed "
+                                    f"only these commands so far:\n{ran}\n"
+                                    "The real outputs above are the ONLY results you have. Do NOT rely "
+                                    "on or claim any analysis you have not actually run (e.g. a BLAST "
+                                    "or alignment you only imagined). Run the decisive analysis command "
+                                    "for real, read its true output, and submit only then."
+                                ),
+                            }
+                        )
+                        continue
+                    final = candidate
                     transcript.append(
                         {
                             "turn": turn,
@@ -1589,6 +1729,15 @@ def main(argv: list[str] | None = None) -> int:
         "without submitting. If it loops again after the nudge, it is scored a loop.",
     )
     parser.add_argument(
+        "--min-commands-before-answer",
+        type=int,
+        default=0,
+        help="Grounding guard (0 = off): refuse submit_answer until the model has actually run "
+        "this many distinct shell commands. On an early submit, the model is shown its real "
+        "command list and told not to rely on analysis it never ran — countering small models "
+        "that fabricate (hallucinate) tool output and answer on it. Caps at 3 pushbacks/task.",
+    )
+    parser.add_argument(
         "--partner-advice-dir",
         default=None,
         help="Directory of per-task partner-advice files (<problem_id>.txt). When set, "
@@ -1728,6 +1877,7 @@ def main(argv: list[str] | None = None) -> int:
                 loop_repeat_limit=args.loop_repeat_limit,
                 force_answer_on_loop=args.force_answer_on_loop,
                 partner_advice=_load_partner_advice(args.partner_advice_dir, problem.id),
+                min_commands_before_answer=args.min_commands_before_answer,
             )
         except Exception as exc:  # noqa: BLE001 - one bad task must not sink a multi-task run
             print(f"  ERROR on {problem.id}: {exc!r}", flush=True)
