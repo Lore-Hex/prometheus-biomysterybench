@@ -782,29 +782,43 @@ def agentic_claude_solve(
         "--no-session-persistence",
         "--strict-mcp-config",
     ]
-    try:
-        completed = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
-        )
-    except subprocess.TimeoutExpired:
-        return "", [{"turn": 1, "action": {"agentic": True}, "output": "agentic CLI timed out"}], {}, "agentic_timeout"
-    data = _parse_claude_cli_json(completed.stdout)
-    if not isinstance(data, dict) or not data.get("result"):
-        snippet = (completed.stderr or completed.stdout or "")[:300]
-        return "", [], {}, f"agentic_no_result: {snippet}"
-    result_text = str(data.get("result") or "")
-    match = re.search(r"FINAL ANSWER:\s*(.+)", result_text, re.IGNORECASE | re.DOTALL)
-    final = (match.group(1) if match else result_text).strip().strip("*").strip()[:2000]
-    usage = _map_claude_usage(data.get("usage"))
-    turns = int(data.get("num_turns") or 0)
-    transcript = [
-        {
-            "turn": turns,
-            "assistant": result_text[:4000],
-            "action": {"tool": "submit_answer", "final": bool(final), "agentic": True},
-        }
-    ]
-    return final, transcript, usage, ""
+    last_err = "agentic_no_result"
+    for attempt in range(1, 5):
+        try:
+            completed = subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
+            )
+        except subprocess.TimeoutExpired:
+            return "", [{"turn": 1, "action": {"agentic": True}, "output": "agentic CLI timed out"}], {}, "agentic_timeout"
+        data = _parse_claude_cli_json(completed.stdout)
+        if not isinstance(data, dict) or not data.get("result"):
+            # error_max_turns / other terminal CLI states carry no result and are not transient.
+            if isinstance(data, dict) and data.get("subtype") == "error_max_turns":
+                return "", [{"turn": int(data.get("num_turns") or 0), "action": {"agentic": True}}], _map_claude_usage(data.get("usage")), "agentic_max_turns"
+            return "", [], {}, f"agentic_no_result: {(completed.stderr or completed.stdout or '')[:200]}"
+        result_text = str(data.get("result") or "")
+        # Transient API overload/rate-limit: the CLI returns the error AS the result. Retry with
+        # backoff instead of recording the error string as the model's answer.
+        low = result_text.lower()
+        if data.get("is_error") or "api error" in low or "overloaded" in low or "rate limit" in low:
+            last_err = f"agentic_api_error: {result_text[:150]}"
+            if attempt < 4:
+                time.sleep(20 * attempt)
+                continue
+            return "", [], _map_claude_usage(data.get("usage")), last_err
+        match = re.search(r"FINAL ANSWER:\s*(.+)", result_text, re.IGNORECASE | re.DOTALL)
+        final = (match.group(1) if match else result_text).strip().strip("*").strip()[:2000]
+        usage = _map_claude_usage(data.get("usage"))
+        turns = int(data.get("num_turns") or 0)
+        transcript = [
+            {
+                "turn": turns,
+                "assistant": result_text[:4000],
+                "action": {"tool": "submit_answer", "final": bool(final), "agentic": True},
+            }
+        ]
+        return final, transcript, usage, ""
+    return "", [], {}, last_err
 
 
 def call_model(
